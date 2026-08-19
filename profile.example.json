@@ -1,0 +1,16 @@
+{
+  "full_name": "Your Name",
+  "email": "you@example.com",
+  "phone": "+1 555 000 0000",
+  "location": "City, Country",
+  "linkedin_url": "https://www.linkedin.com/in/your-profile",
+  "github_url": "https://github.com/your-handle",
+  "portfolio_url": "https://example.com",
+  "resume_path": "/absolute/path/to/resume.pdf",
+  "years_experience": "",
+  "current_title": "",
+  "work_authorization": "",
+  "expected_salary": "",
+  "willing_to_relocate": "",
+  "cover_letter_tone": "professional, concise, slightly warm"
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "1password": {
+      "command": "npx",
+      "args": ["-y", "@jrejaud/op-mcp"],
+      "env": {},
+      "disabled": true
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# Secrets and user-specific configuration
+.env
+profile.json
+mcp.json
+mcp.local.json
+
+# Persistent browser identity and private browsing data
+.browser-profile/
+
+# Runtime artifacts
+logs/
+jobs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
