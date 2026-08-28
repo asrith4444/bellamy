@@ -19,6 +19,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .agent import run_task, LOGS_DIR
+from .jobs import build_job_search_task
 
 mcp = FastMCP("bellamy")
 
@@ -44,17 +45,10 @@ async def bellamy_job_search(query: str, location: str = "", sites: str = "linke
     Args:
         query: job title or keywords, e.g. "senior python developer"
         location: optional location filter, e.g. "remote" or "Berlin"
-        sites: comma-separated list from linkedin, indeed, glassdoor
+        sites: comma-separated list such as linkedin, indeed, glassdoor, dice
     """
-    site_list = ", ".join(s for s in sites.split(",") if s.strip())
-    loc = f" in {location}" if location else ""
-    task = (
-        f"Search for '{query}' jobs{loc} on {site_list}. "
-        "Use each site's own search box, extract the top 10 matching listings "
-        "(title, company, location, URL), and return them as a numbered list. "
-        "Do not open every listing — just collect the search results."
-    )
-    out = await run_task(task, max_steps=max_steps, quiet=True)
+    task = build_job_search_task(query, location=location, sites=sites)
+    out = await run_task(task, max_steps=max_steps, use_mcp=False, quiet=True)
     return f"[{'SUCCESS' if out['success'] else 'INCOMPLETE'} in {out['steps']} steps]\n{out['result']}"
 
 
@@ -72,7 +66,7 @@ async def bellamy_extract_job(url: str, save: bool = True) -> str:
         if save else ""
     )
     task = f"Open this job posting and extract the complete job description: {url}.{save_clause}"
-    out = await run_task(task, max_steps=15, quiet=True)
+    out = await run_task(task, max_steps=15, use_mcp=False, quiet=True)
     return f"[{'SUCCESS' if out['success'] else 'INCOMPLETE'} in {out['steps']} steps]\n{out['result']}"
 
 

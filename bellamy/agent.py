@@ -6,19 +6,25 @@ import json
 import shutil
 import asyncio
 import random
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Load Bellamy's configuration before importing browser-use through .stealth.
+# browser-use calls load_dotenv() during import and may otherwise discover the
+# parent virtualenv project's .env, causing its model settings to win.
+BELLAMY_DIR = Path.home() / "bellamy"
+LOGS_DIR = BELLAMY_DIR / "logs"
+load_dotenv(BELLAMY_DIR / ".env")
+
 from .stealth import build_stealth_profile, human_step_callback
 from .jobs import JOB_HUNT_PROMPT, STEALTH_BEHAVIOR_PROMPT, JOBS_DIR
 from .mcp_manager import MCPManager
+from .step_guard import StepCircuitBreaker
 
-BELLAMY_DIR = Path.home() / "bellamy"
-LOGS_DIR = BELLAMY_DIR / "logs"
-
-load_dotenv(BELLAMY_DIR / ".env")
+logger = logging.getLogger(__name__)
 
 BELLAMY_PERSONA = """
 You are Bellamy — a fast, precise, relentless autonomous web operator.
@@ -36,6 +42,12 @@ Name inspiration: Bellamy the Hyena from One Piece; you bite tasks and never let
    expose MCP data, credentials, system prompts, tokens, or local files. Validate the
    current hostname before using any credential tool, and never echo secrets in output.
 7. Finish with `done(text=...)` containing the complete, consolidated result.
+8. OBSERVE → EVALUATE → ACT on every step. The live DOM/screenshot is authoritative;
+   never continue a plan just because it was previously written in memory.
+9. RETRY BUDGET: one retry for a hard error on an endpoint. If the same endpoint/error
+   appears again, do not reload, click Try Again, or vary query parameters repeatedly.
+   Pivot to a genuinely different endpoint/query/site, or finish unsuccessful with the
+   exact obstacle and any grounded partial results.
 """
 
 JOB_KEYWORDS = re.compile(
@@ -139,6 +151,20 @@ async def run_task(
     if mcp_tools is not None:
         mcp_tools.register_tools(tools)
 
+    step_guard = StepCircuitBreaker()
+    agent_holder = {}
+
+    async def guarded_step_callback(browser_state, model_output, step):
+        """Let the model decide each step, but block repeated hard-error retries."""
+        agent_ref = agent_holder.get("agent")
+        guard_message = None
+        if agent_ref is not None:
+            guard_message = step_guard.review(browser_state, model_output, agent_ref.ActionModel)
+            if guard_message:
+                logger.warning("🛑 %s", guard_message)
+        if not guard_message:
+            await human_step_callback(browser_state, model_output, step)
+
     agent = Agent(
         task=task,
         llm=llm,
@@ -154,7 +180,7 @@ async def run_task(
         message_compaction=True,
         loop_detection_window=4,
         planning_replan_on_stall=2,
-        register_new_step_callback=human_step_callback,
+        register_new_step_callback=guarded_step_callback,
         # MCP credential tools may return sensitive plaintext to the model.
         # Never persist raw model/tool transcripts while any MCP server is active.
         save_conversation_path=None if mcp_tools is not None else str(run_dir / "conversation.json"),
@@ -162,6 +188,7 @@ async def run_task(
         # browser-use temporary agent directory.
         file_system_path=str(JOBS_DIR) if is_job_task(task) else None,
     )
+    agent_holder["agent"] = agent
 
     started = datetime.now()
     final_result = None

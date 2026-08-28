@@ -3,13 +3,23 @@
 > *"The Hyena never lets go."* — Bellamy, One Piece
 
 Bellamy is a stealthy, human-paced, autonomous browser agent powered by
-**browser-use + Playwright Chromium + OpenRouter (GPT-5.6 Luna)** with **MCP support**
-(1Password, etc.), built for **job hunting** — searching boards, extracting job
-descriptions, and submitting applications.
+**browser-use + Playwright Chromium + OpenRouter** with **MCP support** (1Password,
+etc.), built for **job hunting** — searching boards, extracting job descriptions,
+and submitting applications. It uses its own `~/bellamy/.venv` environment.
 
 ---
 
 ## Quick Start
+
+Install Bellamy's pinned dependencies into its own environment:
+
+```bash
+cd ~/bellamy
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+```
+
+Then run:
 
 ```bash
 bellamy "Go to https://news.ycombinator.com and summarize the top 3 stories"
@@ -51,6 +61,12 @@ a visible real window is the strongest stealth signal, and sessions persist afte
    tool-returned secrets are not persisted. Never put a service-account token directly
    in `mcp.json`; inherit it from your shell environment if one is required.
 3. Extracted job descriptions are saved to `~/bellamy/jobs/<company>_<role>.md`.
+4. Boolean `OR` job searches are planned inside Bellamy as independent sequential searches, then merged and deduplicated. Dice receives separate current `/jobs?q=...` URLs because its search route does not reliably accept a literal combined `OR` query.
+5. Bellamy never guesses legacy API hosts from model memory. It uses the live public UI or endpoints discovered from the current site. The retired `service.dice.com` host is explicitly prohibited.
+
+Bellamy intentionally uses one browser instance/profile for this fan-out. Parallel instances sharing the profile would conflict, while separate identities from one IP increase request rate and bot-detection risk without materially improving a two-query search.
+
+Every browser-use step is observed and decided by the model from the current live DOM/screenshot. A runtime circuit breaker complements that reasoning: one retry is allowed for a hard endpoint error, the next repeated retry is replaced with a fresh decision cycle, and a second ignored warning ends unsuccessfully. CAPTCHA and rate-limit pages stop immediately. Genuine pivots to another endpoint/query/site remain allowed.
 
 ---
 
@@ -100,6 +116,8 @@ start, and its tools are injected as browser-use actions the agent can call mid-
 │   ├── jobs.py          job-hunt protocol + profile injection
 │   ├── mcp_manager.py   MCP client bridge → agent actions
 │   └── server.py        MCP server for other agents
+├── requirements.txt     pinned direct Python dependencies
+├── .venv/               Bellamy's independent Python environment
 ├── profile.json         your job-seeker identity
 ├── mcp.json             MCP servers (1Password)
 ├── .browser-profile/    persistent stealth browser identity

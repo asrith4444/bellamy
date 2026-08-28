@@ -1,0 +1,4 @@
+# Bellamy runtime dependencies
+browser-use==0.13.8
+mcp==1.26.0
+python-dotenv==1.2.2

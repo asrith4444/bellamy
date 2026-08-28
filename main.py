@@ -42,6 +42,7 @@ def build_parser():
     jobs.add_argument("-m", "--model", default=None, help=argparse.SUPPRESS)
     jobs.add_argument("--headed", action="store_true")
     jobs.add_argument("--headless", action="store_true")
+    jobs.add_argument("--no-mcp", action="store_true", help="skip MCP credential servers for read-only search")
 
     ext = sub.add_parser("extract", help="extract a job description from URL")
     ext.add_argument("url")
@@ -125,7 +126,8 @@ def doctor(run_stealth: bool = False):
     if run_stealth:
         print("\nRunning live Chromium fingerprint check (still zero LLM/API calls)…\n", flush=True)
         test = root / "tests/stealth_check.py"
-        subprocess.run([str(root / "../browser-use-agent/.venv/bin/python"), str(test)], check=False)
+        python = root / ".venv/bin/python"
+        subprocess.run([str(python), str(test)], check=False)
 
 
 async def main_async(args):
@@ -148,14 +150,19 @@ async def main_async(args):
             use_mcp=not args.no_mcp,
         )
     elif args.cmd == "jobs":
-        sites = ", ".join(s for s in args.sites.split(",") if s.strip())
-        loc = f" in {args.location}" if args.location else ""
-        task = (
-            f"Search for '{args.query}' jobs{loc} on {sites}. Use each site's own search box, "
-            "extract the top 10 matching listings (title, company, location, URL) and return "
-            "them as a numbered list. Do not open every listing."
+        from bellamy.jobs import build_job_search_task
+        task = build_job_search_task(
+            args.query,
+            location=args.location,
+            sites=args.sites,
         )
-        await run_task(task, model=args.model, headless=headless, max_steps=args.steps)
+        await run_task(
+            task,
+            model=args.model,
+            headless=headless,
+            max_steps=args.steps,
+            use_mcp=not args.no_mcp,
+        )
     elif args.cmd == "extract":
         task = (
             f"Open this job posting and extract the complete job description: {args.url}. "
