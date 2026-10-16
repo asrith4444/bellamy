@@ -15,12 +15,12 @@ from dotenv import load_dotenv
 # Load Bellamy's configuration before importing browser-use through .stealth.
 # browser-use calls load_dotenv() during import and may otherwise discover the
 # parent virtualenv project's .env, causing its model settings to win.
-BELLAMY_DIR = Path.home() / "bellamy"
-LOGS_DIR = BELLAMY_DIR / "logs"
-load_dotenv(BELLAMY_DIR / ".env")
+from .paths import BELLAMY_HOME, ENV_PATH, JOBS_DIR, LOGS_DIR
+
+load_dotenv(ENV_PATH)
 
 from .stealth import build_stealth_profile, human_step_callback
-from .jobs import JOB_HUNT_PROMPT, STEALTH_BEHAVIOR_PROMPT, JOBS_DIR
+from .jobs import JOB_HUNT_PROMPT, STEALTH_BEHAVIOR_PROMPT
 from .mcp_manager import MCPManager
 from .step_guard import StepCircuitBreaker
 
@@ -66,6 +66,11 @@ def slugify(text: str, max_len: int = 40) -> str:
     return clean[:max_len].rstrip("_") or "task"
 
 
+def _jobs_dir() -> Path:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    return JOBS_DIR
+
+
 def get_api_key() -> str:
     key = os.getenv("OPENROUTER_API_KEY")
     if key and key != "your-openrouter-api-key-here":
@@ -76,7 +81,7 @@ def get_api_key() -> str:
             k = json.load(f).get("openrouter", {}).get("key")
             if k:
                 return k
-    raise ValueError("OpenRouter API key not found (set OPENROUTER_API_KEY in ~/bellamy/.env).")
+    raise ValueError(f"OpenRouter API key not found (set OPENROUTER_API_KEY in {ENV_PATH}).")
 
 
 async def run_task(
@@ -186,7 +191,7 @@ async def run_task(
         save_conversation_path=None if mcp_tools is not None else str(run_dir / "conversation.json"),
         # Job-description files persist here instead of disappearing with the
         # browser-use temporary agent directory.
-        file_system_path=str(JOBS_DIR) if is_job_task(task) else None,
+        file_system_path=str(_jobs_dir()) if is_job_task(task) else None,
     )
     agent_holder["agent"] = agent
 

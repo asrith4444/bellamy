@@ -16,8 +16,7 @@ from pathlib import Path
 
 from browser_use.browser.profile import BrowserProfile
 
-BELLAMY_DIR = Path.home() / "bellamy"
-PROFILE_DIR = BELLAMY_DIR / ".browser-profile"
+from .paths import BROWSER_PROFILE_DIR as PROFILE_DIR
 
 # Real Chrome UA on Linux (no "Headless" marker — safe even in headless mode)
 REAL_CHROME_UA = (

@@ -9,7 +9,7 @@ Tools exposed:
   bellamy_task      — run any autonomous browsing task
   bellamy_job_search — search job boards & return listings
   bellamy_extract_job — fetch full job description from a URL
-  bellamy_apply_job   — apply to a job URL using ~/bellamy/profile.json
+  bellamy_apply_job   — apply to a job URL using BELLAMY_HOME/profile.json
   bellamy_last        — return the last run's result
 """
 
@@ -58,7 +58,7 @@ async def bellamy_extract_job(url: str, save: bool = True) -> str:
 
     Args:
         url: direct link to the job posting
-        save: also write it to ~/bellamy/jobs/<company>_<role>.md
+        save: also write it to BELLAMY_HOME/jobs/<company>_<role>.md
     """
     save_clause = (
         " Then save the full description (title, company, location, salary if present, "
@@ -72,7 +72,7 @@ async def bellamy_extract_job(url: str, save: bool = True) -> str:
 
 @mcp.tool()
 async def bellamy_apply_job(url: str, notes: str = "") -> str:
-    """Apply to a job posting using the profile in ~/bellamy/profile.json.
+    """Apply to a job posting using the profile in BELLAMY_HOME/profile.json.
 
     Uses 1Password MCP for any login/credential needs; never invents personal data.
     Args:

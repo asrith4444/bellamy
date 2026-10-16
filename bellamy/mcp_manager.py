@@ -1,7 +1,7 @@
 """MCP bridge: load external MCP servers (e.g. 1Password) and expose their tools
 as browser-use actions so Bellamy can call them mid-browsing.
 
-Config format (~/bellamy/mcp.json) — same as Claude Desktop:
+Config format (BELLAMY_HOME/mcp.json) — same as Claude Desktop:
 
 {
   "mcpServers": {
@@ -22,7 +22,7 @@ from pydantic import BaseModel, create_model
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-MCP_CONFIG_PATH = Path.home() / "bellamy" / "mcp.json"
+from .paths import MCP_CONFIG_PATH
 
 
 def load_mcp_config() -> dict:

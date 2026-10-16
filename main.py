@@ -7,6 +7,7 @@ Usage:
   bellamy extract <job-url>         pull a full job description
   bellamy apply <job-url>           apply using ~/bellamy/profile.json
   bellamy serve                     run as MCP server (for pi/opencode)
+  bellamy worker                    JSON-lines read/fill/submit session (used by Mark)
   bellamy --last / --logs           view results
 """
 
@@ -56,6 +57,7 @@ def build_parser():
     app.add_argument("-m", "--model", default=None, help=argparse.SUPPRESS)
 
     sub.add_parser("serve", help="run Bellamy as an MCP stdio server")
+    sub.add_parser("worker", help="JSON-lines form session for other programs (read, fill, submit)", add_help=False)
     doctor = sub.add_parser("doctor", help="zero-LLM installation and stealth diagnostics")
     doctor.add_argument("--stealth", action="store_true", help="also run the live fingerprint check")
 
@@ -87,7 +89,7 @@ def show_logs():
 
 def doctor(run_stealth: bool = False):
     """Validate Bellamy without making any OpenRouter/model calls."""
-    root = Path.home() / "bellamy"
+    from bellamy.paths import BELLAMY_HOME as root
     chrome = Path.home() / ".cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
     checks = [
         ("Bellamy CLI in PATH", shutil.which("bellamy") is not None),
@@ -134,7 +136,8 @@ async def main_async(args):
     from bellamy.agent import run_task
     from dotenv import load_dotenv
     import os
-    load_dotenv(Path.home() / "bellamy" / ".env")
+    from bellamy.paths import ENV_PATH
+    load_dotenv(ENV_PATH)
 
     headless = None
     if getattr(args, "headed", False):
@@ -186,6 +189,11 @@ async def main_async(args):
 
 
 def main():
+    if sys.argv[1:2] == ["worker"]:
+        from bellamy.worker import main as worker_main
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+        worker_main()
+        return
     parser = build_parser()
 
     # Ergonomic shortcut: `bellamy "browse task"` becomes

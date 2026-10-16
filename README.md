@@ -5,7 +5,8 @@
 Bellamy is a stealthy, human-paced, autonomous browser agent powered by
 **browser-use + Playwright Chromium + OpenRouter** with **MCP support** (1Password,
 etc.), built for **job hunting** — searching boards, extracting job descriptions,
-and submitting applications. It uses its own `~/bellamy/.venv` environment.
+and submitting applications. It uses its own `.venv` environment. Config and data live in `BELLAMY_HOME`
+(default `~/bellamy`), so the code can be checked out anywhere.
 
 ---
 
@@ -69,6 +70,24 @@ Bellamy intentionally uses one browser instance/profile for this fan-out. Parall
 Every browser-use step is observed and decided by the model from the current live DOM/screenshot. A runtime circuit breaker complements that reasoning: one retry is allowed for a hard endpoint error, the next repeated retry is replaced with a fresh decision cycle, and a second ignored warning ends unsuccessfully. CAPTCHA and rate-limit pages stop immediately. Genuine pivots to another endpoint/query/site remain allowed.
 
 ---
+
+## 🧾 Worker mode (used by Mark)
+
+`bellamy worker` (or `python -m bellamy.worker`) keeps one browser open and reads JSON
+commands from stdin, one per line, answering one JSON line each on stdout:
+
+| Command | Does | Returns |
+| :--- | :--- | :--- |
+| `read_form` | opens the posting, opens its form, lists every field | `FormRead` |
+| `fill` | fills the form with exact `label => value` pairs, uploads files; **never submits** | `FillReport` |
+| `submit` | clicks the final submit once and reads the confirmation | `SubmitResult` |
+| `screenshot` | saves a full-page screenshot | path |
+| `close` | ends the session | |
+
+In `read_form` and `fill`, a deterministic submit guard blocks clicks on final submit
+buttons, Enter key presses and scripted form submits, whatever the model decides. The
+caller checks the fill report and only then sends `submit`. Every reply carries the run's
+token usage and cost.
 
 ## 🔌 MCP
 

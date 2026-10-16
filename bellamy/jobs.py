@@ -1,6 +1,6 @@
 """Job-hunting skills for Bellamy: search, extract job descriptions, apply.
 
-User identity lives in ~/bellamy/profile.json. Credentials come from MCP
+User identity lives in BELLAMY_HOME/profile.json. Credentials come from MCP
 (e.g. 1Password) — never hardcoded.
 """
 
@@ -9,9 +9,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote_plus
 
-PROFILE_PATH = Path.home() / "bellamy" / "profile.json"
-JOBS_DIR = Path.home() / "bellamy" / "jobs"
-JOBS_DIR.mkdir(parents=True, exist_ok=True)
+from .paths import JOBS_DIR, PROFILE_PATH  # noqa: F401  (JOBS_DIR re-exported)
 
 
 def load_profile() -> dict:
@@ -24,7 +22,7 @@ def load_profile() -> dict:
 def profile_block() -> str:
     p = load_profile()
     if not p:
-        return "PROFILE: (empty — user has not filled ~/bellamy/profile.json)"
+        return f"PROFILE: (empty — user has not filled {PROFILE_PATH})"
     lines = ["PROFILE (use these exact values when filling forms; never invent data):"]
     for k, v in p.items():
         if k == "resume_path":
@@ -126,9 +124,10 @@ APPLYING:
 - On multi-step application forms: complete one page per step, verify each field
   actually contains the right value before advancing, and screenshot-confirm the
   final submission page. Report the confirmation in `done`.
-- If a site demands an account signup: generate signup data from PROFILE, use MCP
-  for password creation/retrieval, and record the created credentials summary in `done`
-  (never print the password itself).
+- Never create a site account unless the current task explicitly allows signup. When it
+  does: use PROFILE data, use MCP for password creation/retrieval, and record a credentials
+  summary in `done` (never print the password itself). Otherwise stop and report that the
+  site requires an account.
 - If a human decision is genuinely required (e.g. unusual legal question), stop and
   report the question instead of guessing.
 """
