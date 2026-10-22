@@ -7,6 +7,7 @@ reloads of the same hard-error endpoint after that reasoning has already failed.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,7 +15,7 @@ from urllib.parse import urlsplit
 
 
 HARD_ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("captcha", ("captcha", "verify you are human", "are you a robot")),
+    ("captcha", ("captcha", "verify you are human", "are you a robot", "i'm not a robot", "i’m not a robot")),
     ("rate_limit", ("too many requests", "rate limit", "unusual activity")),
     ("dns", ("dns_probe_finished_nxdomain", "server ip address could not be found")),
     ("access_denied", ("access denied", "forbidden", "request blocked")),
@@ -23,9 +24,20 @@ HARD_ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _RETRY_WORDS = ("retry", "try again", "reload", "refresh", "same url", "current page")
 
+# Markers are matched against what a person reads, not the page's markup. Ordinary application
+# forms (Greenhouse, Ashby, Lever) embed an invisible CAPTCHA, which shows up in the agent's page
+# view as a tag such as `<iframe title=reCAPTCHA role=presentation />`, plus a required notice
+# ("This site is protected by reCAPTCHA..."). Neither is a challenge.
+_TAG = re.compile(r"<[^<>\n]*>")
+_CAPTCHA_NOTICE = re.compile(r"protected by (?:re|h)captcha", re.IGNORECASE)
+
+
+def visible_text(dom_text: str) -> str:
+    return _CAPTCHA_NOTICE.sub(" ", _TAG.sub(" ", dom_text))
+
 
 def detect_hard_error(dom_text: str) -> str | None:
-    text = dom_text.lower()
+    text = visible_text(dom_text).lower()
     for name, markers in HARD_ERROR_MARKERS:
         if any(marker in text for marker in markers):
             return name
@@ -123,23 +135,39 @@ class StepCircuitBreaker:
         )
 
         should_finish = terminal_safety_error or blocked >= 2
+        payloads = []
         if should_finish:
-            payload = {
-                "done": {
-                    "text": reason + " Stopped without claiming success; report the obstacle and any grounded partial results.",
-                    "success": False,
-                }
-            }
-        else:
-            # A no-op gives the model one fresh observation cycle. The modified
-            # memory/goal makes the next LLM decision explicitly choose a new
-            # endpoint/query/site or finish, rather than executing this retry.
-            payload = {"wait": {"seconds": 1}}
+            text = reason + " Stopped without claiming success; report the obstacle and any grounded partial results."
+            payloads += [
+                {"done": {"text": text, "success": False}},
+                {"done": {"success": False, "data": {"blockers": [f"{error} on {endpoint[0]}{endpoint[1]}"]}}},
+            ]
+        # A no-op gives the model one fresh observation cycle. The modified
+        # memory/goal makes the next LLM decision explicitly choose a new
+        # endpoint/query/site or finish, rather than executing this retry.
+        payloads.append({"wait": {"seconds": 1}})
+
+        payload, action = _first_valid(action_model, payloads)
+        if action is None:
+            return reason
+        if "wait" in payload:
             model_output.memory = ((getattr(model_output, "memory", "") or "") + "\n" + reason).strip()
             model_output.next_goal = (
+                "Stop now: call done(success=false) and report the obstacle." if should_finish else
                 "Choose a genuinely different endpoint/query/site now, or call done(success=false). "
                 "Do not retry/reload the blocked endpoint."
             )
-
-        model_output.action = [action_model.model_validate(payload)]
+        model_output.action = [action]
         return reason
+
+
+def _first_valid(action_model: Any, payloads: list[dict]) -> tuple[dict | None, Any]:
+    """The first payload this run's actions accept. A free-form task's done takes text; a task with
+    an output model (worker mode) takes data of that model instead. Raising here would fail the
+    agent's step, every step, so a payload that doesn't fit is skipped."""
+    for payload in payloads:
+        try:
+            return payload, action_model.model_validate(payload)
+        except Exception:
+            continue
+    return None, None

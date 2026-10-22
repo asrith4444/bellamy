@@ -96,5 +96,84 @@ class StepCircuitBreakerTests(unittest.TestCase):
         self.assertFalse(proposed.action[0].payload["done"]["success"])
 
 
+# What browser-use showed the agent on a Greenhouse application form (trimmed).
+GREENHOUSE_FORM = (
+    "[2101]<input name=resume type=file />\nResume/CV*\n"
+    "|scroll element|<iframe title=reCAPTCHA role=presentation name=a-f5px2sqivtg2 /> (scroll)\n"
+    "\t[2116]<div />\n[2120]<button type=submit />\n\tSubmit application"
+)
+
+
+class CaptchaDetectionTests(unittest.TestCase):
+    def test_invisible_recaptcha_on_an_application_form_is_not_a_hard_error(self):
+        self.assertIsNone(detect_hard_error(GREENHOUSE_FORM))
+
+    def test_captcha_notices_are_not_hard_errors(self):
+        self.assertIsNone(detect_hard_error(
+            "This site is protected by reCAPTCHA and the Google Privacy Policy and Terms of Service apply."))
+        self.assertIsNone(detect_hard_error("This form is protected by hCaptcha."))
+
+    def test_visible_challenges_are_still_detected(self):
+        for text in ("Verify you are human by completing the action below.",
+                     "Please complete the CAPTCHA to continue.", "I'm not a robot"):
+            with self.subTest(text=text):
+                self.assertEqual(detect_hard_error(text), "captcha")
+
+    def test_breaker_lets_an_application_form_through(self):
+        state = SimpleNamespace(url="https://job-boards.greenhouse.io/acme/jobs/1", dom_state=FakeDom(GREENHOUSE_FORM))
+        proposed = output({"scroll": {"down": True}}, "Scroll to the rest of the form")
+
+        self.assertIsNone(StepCircuitBreaker().review(state, proposed, FakeActionModel))
+        self.assertEqual(proposed.action[0].payload, {"scroll": {"down": True}})
+
+
+def real_action_model(output_model=None):
+    try:
+        from browser_use.tools.service import Tools
+    except ImportError as exc:
+        raise unittest.SkipTest(f"browser-use not installed: {exc}")
+    return Tools(output_model=output_model).registry.create_action_model()
+
+
+class StopActionTests(unittest.TestCase):
+    """The breaker's stop must be an action the run accepts, or browser-use fails the step."""
+
+    def setUp(self):
+        self.state = SimpleNamespace(url="https://jobs.example.com/apply", dom_state=FakeDom("Verify you are human"))
+
+    def test_worker_run_stops_with_structured_blockers(self):
+        from bellamy.forms import FormRead
+
+        proposed = output({"scroll": {"down": True}}, "Scroll down")
+        message = StepCircuitBreaker().review(self.state, proposed, real_action_model(FormRead))
+
+        done = proposed.action[0].model_dump(exclude_none=True)["done"]
+        self.assertIn("Circuit breaker", message)
+        self.assertFalse(done["success"])
+        self.assertEqual(done["data"]["blockers"], ["captcha on jobs.example.com/apply"])
+
+    def test_free_form_run_stops_with_text(self):
+        proposed = output({"scroll": {"down": True}}, "Scroll down")
+        StepCircuitBreaker().review(self.state, proposed, real_action_model())
+
+        done = proposed.action[0].model_dump(exclude_none=True)["done"]
+        self.assertFalse(done["success"])
+        self.assertIn("Stopped", done["text"])
+
+    def test_waits_instead_of_raising_when_no_stop_fits(self):
+        class WaitOnly:
+            @staticmethod
+            def model_validate(payload):
+                if "wait" not in payload:
+                    raise ValueError("unsupported action")
+                return FakeAction(payload)
+
+        proposed = output({"scroll": {"down": True}}, "Scroll down")
+        StepCircuitBreaker().review(self.state, proposed, WaitOnly)
+
+        self.assertEqual(proposed.action[0].payload, {"wait": {"seconds": 1}})
+        self.assertIn("done(success=false)", proposed.next_goal)
+
+
 if __name__ == "__main__":
     unittest.main()
