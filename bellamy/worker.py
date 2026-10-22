@@ -34,6 +34,33 @@ from pydantic import BaseModel  # noqa: E402
 
 from .forms import FillReport, FormRead, SubmitGuard, SubmitResult  # noqa: E402
 
+# Application forms are big pages. A model that thinks at length on every step outlasted
+# browser-use's 75-second limit per model call, so ask for brief reasoning and allow a bit more time.
+# BELLAMY_REASONING_EFFORT="" sends no effort setting, leaving the model's own default.
+REASONING_EFFORT = os.getenv("BELLAMY_REASONING_EFFORT", "low")
+LLM_TIMEOUT = int(os.getenv("BELLAMY_LLM_TIMEOUT", "120"))
+
+
+def make_llm(model: str, **overrides: Any):
+    """The worker's model client. browser-use sends a reasoning effort only for OpenAI's reasoning
+    models; listing the configured model sends it for any model (OpenRouter applies it to GLM)."""
+    from browser_use.llm.openai.chat import ChatOpenAI
+
+    from .agent import get_api_key
+
+    params: dict[str, Any] = {
+        "model": model,
+        "base_url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        "max_completion_tokens": 8192,
+    }
+    if REASONING_EFFORT:
+        params.update(reasoning_models=[model], reasoning_effort=REASONING_EFFORT)
+    params.update(overrides)
+    if "api_key" not in params:
+        params["api_key"] = get_api_key()
+    return ChatOpenAI(**params)
+
+
 FORM_PROTOCOL = """
 === APPLICATION FORM PROTOCOL ===
 - Work only on the application form for the job you were given. Never create an account or log
@@ -88,15 +115,11 @@ class Worker:
         if self.browser is not None:
             return
         from browser_use import Browser
-        from browser_use.llm.openai.chat import ChatOpenAI
 
-        from .agent import get_api_key
         from .stealth import build_stealth_profile
 
         self.browser = Browser(browser_profile=build_stealth_profile(headless=self.headless, keep_alive=True))
-        self.llm = ChatOpenAI(model=self.model, api_key=get_api_key(),
-                              base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-                              max_completion_tokens=8192)
+        self.llm = make_llm(self.model)
 
     async def run(self, task: str, output_model: type[BaseModel], *, max_steps: int, guard_active: bool,
                   files: list[str] | None = None) -> tuple[BaseModel | None, dict, bool]:
@@ -127,7 +150,7 @@ class Worker:
         agent = Agent(
             task=task, llm=self.llm, browser=self.browser, tools=Tools(output_model=output_model),
             output_model_schema=output_model, available_file_paths=files or [],
-            calculate_cost=True, use_judge=False, use_vision="auto", llm_screenshot_size=(1024, 640),
+            calculate_cost=True, use_judge=False, use_vision="auto", llm_screenshot_size=(1024, 640), llm_timeout=LLM_TIMEOUT,
             max_history_items=8, max_actions_per_step=5, message_compaction=True,
             extend_system_message=BELLAMY_PERSONA + "\n" + STEALTH_BEHAVIOR_PROMPT + "\n" + FORM_PROTOCOL,
             register_new_step_callback=on_step, save_conversation_path=None,

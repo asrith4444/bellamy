@@ -89,6 +89,11 @@ buttons, Enter key presses and scripted form submits, whatever the model decides
 caller checks the fill report and only then sends `submit`. Every reply carries the run's
 token usage and cost.
 
+Forms are big pages, so the worker asks the model for brief reasoning and allows 120 seconds
+per model call (browser-use's default is 75). Change them in `.env` with
+`BELLAMY_REASONING_EFFORT` (`low` by default; empty for the model's own default) and
+`BELLAMY_LLM_TIMEOUT` (seconds).
+
 ## 🔌 MCP
 
 ### Bellamy as an MCP server (for other agents)
