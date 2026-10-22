@@ -24,6 +24,8 @@ class JobSearchPlannerTests(unittest.TestCase):
         self.assertIn("q=full+stack+developer", task)
         self.assertNotIn("q=entry+level+AI+developer+OR+full+stack+developer", task)
         self.assertIn("Never use service.dice.com", task)
+        self.assertIn('"listings"', task)
+        self.assertIn("Do not wrap the JSON in Markdown", task)
         self.assertIn("Do not guess API hosts", task)
         self.assertIn("one browser instance", task)
 

@@ -12,7 +12,10 @@ import os
 import signal
 import tempfile
 
-CHROME = os.path.expanduser("~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
+from pathlib import Path
+
+CHROME_CANDIDATES = sorted((Path.home() / ".cache/ms-playwright").glob("chromium-*/chrome-linux64/chrome"), reverse=True)
+CHROME = str(next((path for path in CHROME_CANDIDATES if path.is_file()), ""))
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 PROFILE = os.path.expanduser("~/bellamy/.browser-profile")

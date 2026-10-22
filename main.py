@@ -90,10 +90,11 @@ def show_logs():
 def doctor(run_stealth: bool = False):
     """Validate Bellamy without making any OpenRouter/model calls."""
     from bellamy.paths import BELLAMY_HOME as root
-    chrome = Path.home() / ".cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
+    chrome_candidates = sorted((Path.home() / ".cache/ms-playwright").glob("chromium-*/chrome-linux64/chrome"), reverse=True)
+    chrome = next((path for path in chrome_candidates if path.is_file()), None)
     checks = [
         ("Bellamy CLI in PATH", shutil.which("bellamy") is not None),
-        ("Playwright Chromium installed", chrome.exists()),
+        ("Playwright Chromium installed", bool(chrome)),
         ("OpenRouter key configured", bool(os.getenv("OPENROUTER_API_KEY") or (root / ".env").exists())),
         ("Persistent browser profile", (root / ".browser-profile").exists()),
         ("Job profile completed", False),

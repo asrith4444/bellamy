@@ -83,5 +83,43 @@ class StepLimitTests(unittest.TestCase):
         self.assertGreater(worker.LLM_TIMEOUT, 75, "browser-use's default limit was too short for big forms")
 
 
+
+class RepairProtocolTests(unittest.TestCase):
+    def test_read_current_form_preserves_session(self):
+        instance = worker.Worker()
+        instance.run = mock.AsyncMock(return_value=(FormRead(), {}, True))
+        asyncio.run(instance.handle({"cmd": "read_form", "url": None}))
+        task = instance.run.call_args.args[0]
+        self.assertIn("do not navigate away", task)
+        self.assertIn("phone-country", task)
+        self.assertTrue(instance.run.call_args.kwargs["guard_active"])
+
+    def test_repair_pass_includes_failures_and_keeps_submit_guard(self):
+        from bellamy.forms import FillReport
+        instance = worker.Worker()
+        instance.run = mock.AsyncMock(return_value=(FillReport(), {}, True))
+        asyncio.run(instance.handle({"cmd": "fill", "plan": [], "repair": ["resume upload incomplete"], "max_steps": 20}))
+        self.assertIn("resume upload incomplete", instance.run.call_args.args[0])
+        self.assertTrue(instance.run.call_args.kwargs["guard_active"])
+        self.assertEqual(instance.run.call_args.kwargs["max_steps"], 20)
+
+
+class AutoOpenTests(unittest.TestCase):
+    def test_agent_never_opens_a_url_found_in_the_task(self):
+        from bellamy.forms import FillReport
+
+        instance = worker.Worker()
+        instance._ensure = mock.AsyncMock()
+        instance.llm, instance.browser = object(), object()
+        history = mock.MagicMock(structured_output=FillReport(), usage=None)
+        history.is_successful.return_value = True
+        agent = mock.MagicMock()
+        agent.run = mock.AsyncMock(return_value=history)
+        with mock.patch("browser_use.Agent", return_value=agent) as make_agent:
+            task = worker.fill_task({"plan": [{"label": "LinkedIn Profile", "value": "linkedin.com/in/jordan-example"}]})
+            asyncio.run(instance.run(task, FillReport, max_steps=5, guard_active=True))
+        self.assertIs(make_agent.call_args.kwargs["directly_open_url"], False)
+
+
 if __name__ == "__main__":
     unittest.main()
