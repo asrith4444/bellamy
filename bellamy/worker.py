@@ -10,6 +10,9 @@ Send one JSON object per line on stdin; get one JSON object per line on stdout:
   Without "url", read_form and fill work on the page already open (to re-read or repair a
   filled form); fill's optional "repair" lists the problems a check found in the last fill.
   {"id": 3, "cmd": "submit"}                                        -> SubmitResult
+  {"cmd": "fill_direct", "url": "...", "wait_for": "#first_name", "steps": [...]}
+                                                  -> FillReport, no AI (see bellamy/direct.py)
+  {"cmd": "submit_direct", "selector": "button[type=submit]"}       -> SubmitResult, no AI
   {"id": 4, "cmd": "screenshot", "path": "/tmp/x.png"}              -> {"path": ...}
   {"id": 5, "cmd": "close"}
 
@@ -232,6 +235,27 @@ class Worker:
             result, usage, success = await self.run(SUBMIT_TASK, SubmitResult, max_steps=command.get("max_steps", 10),
                                                     guard_active=False)
             return {"result": (result or SubmitResult(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
+        if cmd in ("fill_direct", "submit_direct"):
+            from . import direct
+
+            await self._ensure()
+            await self.browser.start()  # safe to repeat; the AI agent normally starts it
+            if cmd == "fill_direct" and command.get("url"):
+                await self.browser.navigate_to(command["url"])
+            page = await self.browser.must_get_current_page()
+            no_cost = {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "model": "direct"}
+            if cmd == "submit_direct":
+                result = await direct.submit(page, command.get("selector") or "button[type=submit]",
+                                             wait=float(command.get("wait", 30)))
+                return {"result": SubmitResult(**result).model_dump(), "usage": no_cost, "success": result["submitted"]}
+            steps = command.get("steps") or []
+            ready = await direct.wait_for(page, command.get("wait_for") or (steps[0]["selector"] if steps else "form"), timeout=25)
+            if not ready:
+                report = FillReport(blockers=["error: the form did not load"])
+                return {"result": report.model_dump(), "usage": no_cost, "success": False}
+            await direct.settle(page)
+            report = FillReport(**await direct.fill(page, steps))
+            return {"result": report.model_dump(), "usage": no_cost, "success": report.ready_to_submit}
         if cmd == "screenshot":
             await self._ensure()
             await self.browser.take_screenshot(path=command["path"], full_page=True)
