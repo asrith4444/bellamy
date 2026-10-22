@@ -7,6 +7,8 @@ Send one JSON object per line on stdin; get one JSON object per line on stdout:
   {"id": 1, "cmd": "read_form", "url": "..."}                       -> FormRead
   {"id": 2, "cmd": "fill", "plan": [{"label", "value", "kind"}], "files": {"resume": "/path.pdf"}}
                                                                     -> FillReport (never submits)
+  Without "url", read_form and fill work on the page already open (to re-read or repair a
+  filled form); fill's optional "repair" lists the problems a check found in the last fill.
   {"id": 3, "cmd": "submit"}                                        -> SubmitResult
   {"id": 4, "cmd": "screenshot", "path": "/tmp/x.png"}              -> {"path": ...}
   {"id": 5, "cmd": "close"}
@@ -71,7 +73,7 @@ FORM_PROTOCOL = """
 - Finish with done and the structured result.
 """
 
-READ_FORM_TASK = """Open {url}. If it shows a job description with an Apply button, click it to open the
+READ_FORM_TASK = """{where}If it shows a job description with an Apply button, click it to open the
 application form (do not log in or create an account). Then list every field in the application form from
 top to bottom: text inputs, text areas, file uploads, dropdowns, radio groups and checkboxes. For each field
 give its exact visible label, its kind, whether it is required (an asterisk or "required"), and for choice
@@ -85,6 +87,28 @@ is not in the list empty; if it is required, list its label in unfilled_required
 submit button: stop once every listed field is filled. Then scroll through the whole form once and report,
 for each field, the value it now shows. Set ready_to_submit to true only when every required field is filled
 and no error messages are shown."""
+
+REPAIR_NOTE = """A check of the last fill found these problems. Fix each one; keep every field that is
+already correct as it is:
+{problems}
+"""
+CURRENT_PAGE = "Stay on the page that is already open: do not navigate away or reload, since the form may be partly filled.\n"
+
+
+def read_form_task(url: str | None) -> str:
+    return READ_FORM_TASK.format(where=f"Open {url}. " if url else CURRENT_PAGE)
+
+
+def fill_task(command: dict) -> str:
+    plan = "\n".join(f"- {item['label']} => {item['value']}" for item in command.get("plan", []))
+    files = command.get("files") or {}
+    files_text = "".join(f"Upload the {name} file from this exact path: {path}\n" for name, path in files.items())
+    where = f"Open {command['url']}.\n" if command.get("url") else CURRENT_PAGE
+    repair = [str(p) for p in command.get("repair") or [] if str(p).strip()]
+    if repair:
+        where += REPAIR_NOTE.format(problems="\n".join(f"- {p}" for p in repair))
+    return FILL_TASK.format(where=where, plan=plan, files=files_text)
+
 
 SUBMIT_TASK = """The application form on the current page is complete. Click its final submit button exactly
 once and wait for the page to change. Set submitted to true only if you see a confirmation such as "Thank you
@@ -167,16 +191,12 @@ class Worker:
     async def handle(self, command: dict) -> dict:
         cmd = command.get("cmd")
         if cmd == "read_form":
-            result, usage, success = await self.run(READ_FORM_TASK.format(url=command["url"]), FormRead,
+            result, usage, success = await self.run(read_form_task(command.get("url")), FormRead,
                                                     max_steps=command.get("max_steps", 20), guard_active=True)
             return {"result": (result or FormRead(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
         if cmd == "fill":
-            plan = "\n".join(f"- {item['label']} => {item['value']}" for item in command.get("plan", []))
             files = command.get("files") or {}
-            files_text = "".join(f"Upload the {name} file from this exact path: {path}\n" for name, path in files.items())
-            where = f"Open {command['url']}.\n" if command.get("url") else ""
-            task = FILL_TASK.format(where=where, plan=plan, files=files_text)
-            result, usage, success = await self.run(task, FillReport, max_steps=command.get("max_steps", 60),
+            result, usage, success = await self.run(fill_task(command), FillReport, max_steps=command.get("max_steps", 60),
                                                     guard_active=True, files=list(files.values()))
             return {"result": (result or FillReport(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
         if cmd == "submit":

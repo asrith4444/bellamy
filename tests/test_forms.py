@@ -110,5 +110,26 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertTrue(worker.closed)
 
 
+
+class WorkerTaskTests(unittest.TestCase):
+    def test_read_form_opens_url_or_stays_on_the_open_form(self):
+        from bellamy.worker import read_form_task
+
+        self.assertIn("Open https://jobs.example.com/1.", read_form_task("https://jobs.example.com/1"))
+        current = read_form_task(None)
+        self.assertNotIn("None", current)
+        self.assertIn("do not navigate away", current)
+
+    def test_fill_carries_repair_notes_for_the_open_form(self):
+        from bellamy.worker import fill_task
+
+        task = fill_task({"plan": [{"label": "Phone", "value": "555"}], "files": {"resume": "/r.pdf"},
+                          "url": None, "repair": ["resume was not uploaded", " "]})
+        self.assertIn("do not navigate away", task)
+        self.assertIn("- resume was not uploaded", task)
+        self.assertIn("- Phone => 555", task)
+        self.assertIn("/r.pdf", task)
+        self.assertNotIn("check of the last fill", fill_task({"plan": [], "url": "https://jobs.example.com/1"}))
+
 if __name__ == "__main__":
     unittest.main()
