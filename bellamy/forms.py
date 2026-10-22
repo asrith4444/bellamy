@@ -49,6 +49,8 @@ class SubmitResult(BaseModel):
     submitted: bool = False
     confirmation_text: str = ""
     blockers: list[str] = Field(default_factory=list)
+    url: str = ""  # where the page was after the submit
+    page_text: str = ""  # what it said, so an unconfirmed submit can be judged
 
 
 _FINAL = re.compile(r"\b(submit|send (?:my |your )?application|finish application|complete application)\b", re.I)

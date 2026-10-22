@@ -356,9 +356,16 @@ async def submit(page, selector: str, wait: float = 30.0) -> dict:
         match = CONFIRMATION.search(state.get("text", ""))
         if match or "confirmation" in state.get("url", "") and state.get("url") != before:
             sentence = match.group(0) if match else "confirmation page"
-            return {"submitted": True, "confirmation_text": sentence, "blockers": []}
+            return {"submitted": True, "confirmation_text": sentence, "blockers": [], **_evidence(state)}
         if state.get("challenge"):
-            return {"submitted": False, "confirmation_text": "", "blockers": ["captcha: a verification challenge appeared after submit"]}
+            return {"submitted": False, "confirmation_text": "", "blockers": ["captcha: a verification challenge appeared after submit"],
+                    **_evidence(state)}
         if state.get("errors") and asyncio.get_running_loop().time() > deadline - wait + 4:
-            return {"submitted": False, "confirmation_text": "", "blockers": [f"form error: {e}" for e in state["errors"]]}
-    return {"submitted": False, "confirmation_text": "", "blockers": ["no confirmation seen after submit"]}
+            return {"submitted": False, "confirmation_text": "", "blockers": [f"form error: {e}" for e in state["errors"]],
+                    **_evidence(state)}
+    return {"submitted": False, "confirmation_text": "", "blockers": ["no confirmation seen after submit"], **_evidence(state)}
+
+
+def _evidence(state: dict) -> dict:
+    """Where the page ended up and what it said: the record for an outcome Mark can't confirm."""
+    return {"url": state.get("url", ""), "page_text": (state.get("text") or "")[-1500:]}
