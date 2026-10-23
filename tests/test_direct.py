@@ -151,6 +151,33 @@ async def _no_wait(_seconds):
     return None
 
 
+class DeafCodePage(CodePage):
+    """Greenhouse after the code is typed: the first Submit click goes unheard; a second press sends it."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.js_presses = 0
+
+    async def evaluate(self, function, *args):
+        if function is direct._CLICK_JS:
+            self.js_presses += 1
+            self.confirmed = "".join(self.boxes) == self.code
+            return "true"
+        if function is direct._BUTTON_STATE:
+            return json.dumps({"found": True, "busy": False})
+        return await super().evaluate(function, *args)
+
+    async def get_elements_by_css_selector(self, selector):
+        if selector == '[data-bellamy-code-submit="1"]':
+            return [_Deaf()]
+        return await super().get_elements_by_css_selector(selector)
+
+
+class _Deaf:
+    async def click(self):
+        return None  # the page never hears it
+
+
 class StillPage:
     """A form whose Submit does nothing: no busy button, no change. `wakes`: the press that works."""
 
@@ -308,6 +335,17 @@ class CodeStepTests(unittest.TestCase):
         self.assertEqual(page.submits, 2)
         self.assertTrue(result["submitted"])
         self.assertFalse(result.get("code_required"))
+
+    def test_a_code_submit_that_goes_unheard_is_pressed_again(self):
+        page = DeafCodePage(submitted=True)
+        clock = FakeClock()
+        loop = mock.MagicMock()
+        loop.time = clock.time
+        with mock.patch.object(direct.asyncio, "sleep", clock.sleep), \
+                mock.patch.object(direct.asyncio, "get_running_loop", return_value=loop):
+            result = asyncio.run(direct.enter_code(page, "Ab3dE5fG"))
+        self.assertTrue(result["submitted"])
+        self.assertEqual(page.js_presses, 1)  # the first click went unheard; the second press sent it
 
     def test_a_wrong_code_comes_back_with_the_sites_message(self):
         page = CodePage(submitted=True)

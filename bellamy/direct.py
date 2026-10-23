@@ -474,7 +474,9 @@ async def enter_code(page, code: str, selector: str = "button[type=submit]", wai
         return code_result(prompt, "the submit button stayed disabled after typing the code")
     before = (await _js(page, _PAGE_STATE) or {}).get("url", "")
     await (await _element(page, '[data-bellamy-code-submit="1"]')).click()
-    return await _outcome(page, before, wait, code_sent=True)
+    # Submit after the code has gone unheard on Greenhouse (the boxes full, the button enabled, nothing sent):
+    # pressed again when the page shows no reaction.
+    return await _outcome(page, before, wait, code_sent=True, selector='[data-bellamy-code-submit="1"]')
 
 
 async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, selector: str | None = None) -> dict:
@@ -510,8 +512,8 @@ async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, s
                 return code_result(prompt, state=state)
             if prompt.get("error"):
                 return code_result(prompt, prompt["error"], state)
-            continue  # the code is on its way to the site
-        if state.get("errors") and loop.time() > start + 4:
+            # the code is on its way to the site (unless Submit went unheard: checked below)
+        elif state.get("errors") and loop.time() > start + 4:
             return {"submitted": False, "confirmation_text": "", "blockers": [f"form error: {e}" for e in state["errors"]],
                     **_evidence(state)}
         if button is not None and (not button.get("found") or button.get("busy") or state.get("url") != before):
@@ -520,7 +522,8 @@ async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, s
             nudged = True
             await page.evaluate(_CLICK_JS, selector)
     if code_sent and prompt.get("found"):
-        return code_result(prompt, prompt.get("error") or "the site did not take the code", state)
+        unheard = "Submit drew no reaction, even pressed twice" if not reacted else "the site did not take the code"
+        return code_result(prompt, prompt.get("error") or unheard, state)
     if not reacted:
         return {"submitted": False, "confirmation_text": "", "blockers": [UNCHANGED], "form_unchanged": True,
                 **_evidence(state)}
