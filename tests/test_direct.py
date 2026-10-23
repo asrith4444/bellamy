@@ -285,6 +285,15 @@ class FalseCaptchaTests(unittest.TestCase):
             reply = asyncio.run(instance.handle({"cmd": "fill", "url": None, "plan": []}))
         self.assertEqual(reply["result"]["blockers"], ["captcha: select all images with buses"])
 
+    def test_a_blocker_that_says_there_is_none_is_dropped(self):
+        instance, js = self.make(challenge=True)  # even with reCAPTCHA's frame somewhere on the page
+        report = worker.FillReport(blockers=["No errors or blockers observed; no active CAPTCHA challenge blocking the form.",
+                                             "None", "Not logged in: the site requires an account"])
+        instance.run = mock.AsyncMock(return_value=(report, {"cost": 0.01}, True))
+        with js:
+            reply = asyncio.run(instance.handle({"cmd": "fill", "url": None, "plan": []}))
+        self.assertEqual(reply["result"]["blockers"], ["Not logged in: the site requires an account"])
+
     def test_other_blockers_are_kept(self):
         instance, js = self.make(challenge=False)
         read = worker.FormRead(blockers=["login_required", "captcha"])

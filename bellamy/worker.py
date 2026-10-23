@@ -115,6 +115,7 @@ provide its answer. For a file upload, verify the real widget shows the uploaded
 Report a complete final field snapshot including already-correct fields, not just the changes.
 """
 
+NOTHING_BLOCKING = re.compile(r"^\W*(?:no|none|nothing|n/a)\b(?!t)", re.I)  # "No errors or blockers observed", "None"
 CAPTCHA_WORDS = re.compile(r"captcha|turnstile|are you a robot|verify (?:that )?you(?:'re| are) (?:a )?human|human verification", re.I)
 
 REPAIR_NOTE = """A check of the last fill found these problems. Fix each one; keep every field that is
@@ -341,6 +342,10 @@ class Worker:
         mistaking for a challenge; only a visible challenge window counts."""
         from . import direct
 
+        # A "blocker" that says there is none ("No errors or blockers observed") is not one.
+        real = [b for b in result.blockers if not NOTHING_BLOCKING.search(str(b))]
+        if len(real) != len(result.blockers):
+            result = result.model_copy(update={"blockers": real})
         said = [b for b in result.blockers if CAPTCHA_WORDS.search(str(b))]
         if not said:
             return result
