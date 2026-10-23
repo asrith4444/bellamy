@@ -374,5 +374,139 @@ class CodeStepTests(unittest.TestCase):
         self.assertEqual(result["blockers"], ["the code field is not on the page"])
 
 
+class QuestionBox:
+    """One Ashby-style question on a page: Yes/No toggle buttons ("buttons"), a radio or checkbox
+    group ("inputs") or a typeahead ("combo"). Answers the scripts pick() and fill() run."""
+
+    def __init__(self, kind: str, options: list[str], stubborn: bool = False):
+        self.kind, self.options, self.stubborn = kind, options, stubborn
+        self.chosen: list[int] = []
+        self.keys: list[str] = []
+
+    def choose(self, index: int) -> None:
+        if self.stubborn:
+            return
+        self.chosen = [index] if self.kind == "buttons" else sorted(set(self.chosen) | {index})
+
+    async def evaluate(self, function, *args):
+        if function is direct._PICK_SCAN:
+            if self.kind == "missing":
+                return json.dumps({"found": False})
+            return json.dumps({"found": True, "type": self.kind, "options": self.options})
+        if function in (direct._PRESSED, direct._IS_CHECKED):
+            return "true" if int(args[0].split('"')[1]) in self.chosen else "false"
+        if function in (direct._CLICK_SELF, direct._CLICK_LABEL):
+            self.choose(int(args[0].split('"')[1]))
+            return "true"
+        if function is direct._READ_CHOICE:
+            return json.dumps({"found": True, "value": ", ".join(self.options[i] for i in self.chosen), "invalid": False})
+        if "!!document.querySelector(s)" in function:  # wait_for
+            return "true"
+        if function is direct._EMPTY_REQUIRED:
+            return "[]"
+        if function is direct._PAGE_STATE:
+            return json.dumps({"url": "https://x", "errors": [], "challenge": False, "text": "", "success": ""})
+        raise AssertionError(f"unexpected script {function[:40]!r}")
+
+    async def get_elements_by_css_selector(self, selector):
+        return [Choice(self, int(selector.split('"')[1]))] if selector.startswith("[data-bellamy-choice=") else []
+
+    async def press(self, key):
+        self.keys.append(key)
+
+
+class Choice:
+    def __init__(self, page, index):
+        self.page, self.index = page, index
+
+    async def click(self):
+        self.page.choose(self.index)
+
+
+class PickTests(unittest.TestCase):
+    def run_fast(self, coroutine):
+        with mock.patch.object(direct.asyncio, "sleep", _no_wait):
+            return asyncio.run(coroutine)
+
+    def test_yes_no_buttons_are_pressed_by_their_label(self):
+        page = QuestionBox("buttons", ["Yes", "No"])
+        self.assertEqual(self.run_fast(direct.pick(page, '[data-field-path="q1"]', ["No"])), ("No", ""))
+        self.assertEqual(page.chosen, [1])
+
+    def test_a_radio_group_ticks_the_matching_label(self):
+        page = QuestionBox("inputs", ["I identify as a protected veteran", "I am not a protected veteran",
+                                      "I decline to self-identify"])
+        chosen, note = self.run_fast(direct.pick(page, "[data-field-path=v]", ["I am not a protected veteran"]))
+        self.assertEqual((chosen, note, page.chosen), ("I am not a protected veteran", "", [1]))
+
+    def test_several_boxes_in_a_checkbox_group(self):
+        page = QuestionBox("inputs", ["Asian", "Black", "White"])
+        chosen, note = self.run_fast(direct.pick(page, "[data-field-path=r]", ["Asian", "White"]))
+        self.assertEqual((chosen, note, page.chosen), ("Asian, White", "", [0, 2]))
+
+    def test_an_answer_the_question_does_not_offer_is_not_guessed(self):
+        page = QuestionBox("inputs", ["Front End", "Back End"])
+        chosen, note = self.run_fast(direct.pick(page, "[data-field-path=s]", ["Mobile"]))
+        self.assertEqual((chosen, page.chosen), ("", []))
+        self.assertIn("no option matches 'Mobile'", note)
+
+    def test_a_button_that_will_not_stay_pressed_is_reported(self):
+        page = QuestionBox("buttons", ["Yes", "No"], stubborn=True)
+        self.assertEqual(self.run_fast(direct.pick(page, "[data-field-path=q]", ["Yes"])), ("", "Yes: would not press"))
+
+    def test_a_dropdown_question_goes_to_the_dropdown_picker(self):
+        page = QuestionBox("combo", [])
+        with mock.patch.object(direct, "_choose", mock.AsyncMock(return_value=("Austin, Texas, United States", ""))) as choose:
+            out = self.run_fast(direct.pick(page, "[data-field-path=loc]", ["Austin, Texas"], search=True))
+        choose.assert_awaited_once_with(page, '[data-bellamy-choice="combo"]', "Austin, Texas", True)
+        self.assertEqual(out, ("Austin, Texas, United States", ""))
+        self.assertEqual(self.run_fast(direct.pick(page, "[data-field-path=loc]", ["A", "B"]))[1], "the dropdown takes one answer")
+
+    def test_a_missing_question(self):
+        self.assertEqual(self.run_fast(direct.pick(QuestionBox("missing", []), "[data-field-path=x]", ["Yes"])),
+                         ("", "not on the page"))
+
+    def test_fill_reports_what_the_question_shows_and_closes_pickers(self):
+        page = QuestionBox("buttons", ["Yes", "No"])
+        steps = [{"label": "Authorized to work?", "selector": "[data-field-path=q]", "kind": "pick", "value": "Yes",
+                  "required": True, "close": True}]
+        report = self.run_fast(direct.fill(page, steps))
+        self.assertEqual(report["fields"], [{"label": "Authorized to work?", "value": "Yes", "status": "filled", "note": ""}])
+        self.assertTrue(report["ready_to_submit"])
+        self.assertEqual(page.keys, ["Escape"])
+
+    def test_fill_reports_a_required_question_it_could_not_answer(self):
+        page = QuestionBox("inputs", ["Front End", "Back End"])
+        steps = [{"label": "Area?", "selector": "[data-field-path=s]", "kind": "pick", "values": ["Mobile"], "required": True}]
+        report = self.run_fast(direct.fill(page, steps))
+        self.assertEqual(report["unfilled_required"], ["Area?"])
+        self.assertEqual(report["fields"][0]["status"], "failed")
+        self.assertFalse(report["ready_to_submit"])
+
+
+class SuccessPanelTests(unittest.TestCase):
+    def test_a_thank_you_sentence_wins(self):
+        state = {"text": "Your application was successfully submitted.", "success": "Success Your application was successfully submitted."}
+        self.assertEqual(direct.confirmation_sentence(state, direct.CONFIRMATION.search(state["text"])), "successfully submitted")
+
+    def test_a_success_panel_in_the_companys_own_words_still_counts(self):
+        state = {"text": "Success We'll be in touch soon!", "success": "Success We'll be in touch soon!"}
+        sentence = direct.confirmation_sentence(state, None)
+        self.assertTrue(sentence.startswith("application submitted"))
+        self.assertIn("We'll be in touch soon!", sentence)
+
+    def test_submit_sees_the_success_panel(self):
+        class Done(StillPage):
+            async def evaluate(self, function, *args):
+                if function is direct._PAGE_STATE:
+                    return json.dumps({"url": "https://x/apply", "errors": [], "challenge": False,
+                                       "text": "Success We'll be in touch", "success": "Success We'll be in touch"})
+                return await super().evaluate(function, *args)
+        with mock.patch.object(direct.asyncio, "sleep", _no_wait):
+            result = asyncio.run(direct.submit(Done(), "button.ashby-application-form-submit-button", wait=5))
+        self.assertTrue(result["submitted"])
+        self.assertIn("success panel", result["confirmation_text"])
+
+
 if __name__ == "__main__":
     unittest.main()

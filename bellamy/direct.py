@@ -6,9 +6,14 @@ Step kinds:
   text    {"selector", "value"}           type into an input or textarea
   select  {"selector", "value"}           a native <select> or a searchable combobox (react-select)
   check   {"selector"}                    tick a checkbox or radio button
-  upload  {"selector", "path"}            attach a local file to a file input
+  upload  {"selector", "path"}            attach a local file to a file input ("shown_in": where the
+                                          form shows the file's name once it has it)
+  pick    {"selector", "value"|"values"}  choose an answer inside one question's box, whatever draws
+                                          it: Yes/No toggle buttons, a radio or checkbox group (by
+                                          label), or a dropdown/typeahead ("search" for a city lookup)
 Every step also carries "label" (reported back) and "required", and may carry "fallback": other
-step fields to use when its selector is not on the page.
+step fields to use when its selector is not on the page, and "close": press Escape afterwards (a
+date picker left open covers the fields below it).
 
 Nothing here clicks a submit button except submit() and enter_code(), which Mark calls only after
 its own check. When the site emails a code after Submit (Greenhouse's "Security code"), submit()
@@ -42,6 +47,8 @@ _READ = r"""(selector) => {
     const control = el.closest("[class*=control]") || el.parentElement;
     const chips = control ? [...control.querySelectorAll("[class*=single-value], [class*=singleValue], [class*=multi-value__label], [class*=multiValue] > div:first-child")] : [];
     value = chips.map(c => c.innerText.trim()).filter(Boolean).join(", ");
+    // A typeahead that keeps the choice as its text (Ashby), not react-select (its text box holds only the search).
+    if (!value && !el.closest("[class*=control]") && el.getAttribute("aria-expanded") !== "true") value = el.value || "";
   } else {
     value = el.value || "";
   }
@@ -83,10 +90,61 @@ _EMPTY_REQUIRED = r"""(covered) => {
   return JSON.stringify([...new Set(out)]);
 }"""
 
+# One question's box for a "pick" step: what draws its choices, and their labels. Each choice is
+# tagged data-bellamy-choice="0", "1", ... (the dropdown: "combo") so it can be clicked by tag.
+_PICK_SCAN = r"""(selector) => {
+  const box = document.querySelector(selector);
+  if (!box) return JSON.stringify({found: false});
+  document.querySelectorAll("[data-bellamy-choice]").forEach(e => e.removeAttribute("data-bellamy-choice"));
+  const tidy = (t) => (t || "").replace(/\s+/g, " ").trim();
+  const buttons = [...box.querySelectorAll("button[aria-pressed]")];
+  if (buttons.length) {
+    buttons.forEach((b, i) => b.setAttribute("data-bellamy-choice", String(i)));
+    return JSON.stringify({found: true, type: "buttons", options: buttons.map(b => tidy(b.innerText))});
+  }
+  const labelOf = (i) => i.id && document.querySelector('label[for="' + CSS.escape(i.id) + '"]');
+  const inputs = [...box.querySelectorAll("input[type=radio], input[type=checkbox]")].filter(labelOf);
+  if (inputs.length) {
+    inputs.forEach((x, i) => x.setAttribute("data-bellamy-choice", String(i)));
+    return JSON.stringify({found: true, type: "inputs", options: inputs.map(x => tidy(labelOf(x).innerText))});
+  }
+  const combo = box.querySelector("[role=combobox], select");
+  if (combo) { combo.setAttribute("data-bellamy-choice", "combo"); return JSON.stringify({found: true, type: "combo"}); }
+  return JSON.stringify({found: true, type: "none"});
+}"""
+
+# What a question's box shows as chosen: pressed buttons, ticked boxes (their labels), or the dropdown's choice.
+_READ_CHOICE = r"""(selector) => {
+  const box = document.querySelector(selector);
+  if (!box) return JSON.stringify({found: false});
+  const tidy = (t) => (t || "").replace(/\s+/g, " ").trim();
+  const pressed = [...box.querySelectorAll('button[aria-pressed="true"]')].map(b => tidy(b.innerText));
+  const ticked = [...box.querySelectorAll("input[type=radio], input[type=checkbox]")].filter(i => i.checked && i.id).map(i => {
+    const label = document.querySelector('label[for="' + CSS.escape(i.id) + '"]');
+    return label ? tidy(label.innerText) : "checked";
+  });
+  let value = [...pressed, ...ticked].join(", ");
+  const combo = box.querySelector("[role=combobox]");
+  const select = box.querySelector("select");
+  if (!value && combo) {
+    const control = combo.closest("[class*=control]") || combo.parentElement;
+    const chips = control ? [...control.querySelectorAll("[class*=single-value], [class*=singleValue], [class*=multi-value__label]")] : [];
+    value = chips.map(c => tidy(c.innerText)).filter(Boolean).join(", ") || (combo.getAttribute("aria-expanded") !== "true" ? combo.value || "" : "");
+  }
+  if (!value && select && select.selectedIndex >= 0) value = tidy(select.options[select.selectedIndex].text);
+  return JSON.stringify({found: true, value, invalid: !!box.querySelector('[aria-invalid="true"]')});
+}"""
+_PRESSED = "(s) => { const b = document.querySelector(s); return !!(b && b.getAttribute('aria-pressed') === 'true'); }"
+
+# A success panel some forms show instead of a thank-you sentence (Ashby's can carry the company's own words).
+SUCCESS_PANELS = ".ashby-application-form-success-container"
+
 # Visible error messages and an active (visible) human-verification challenge.
 _PAGE_STATE = r"""() => {
   const errors = [...document.querySelectorAll("[id$=-error], [class*=error-message], [class*=helper-text--error], [role=alert]")]
     .filter(e => e.offsetParent !== null && e.innerText.trim()).map(e => e.innerText.replace(/\s+/g, " ").trim());
+  const panel = [...document.querySelectorAll(""" + json.dumps(SUCCESS_PANELS) + r""")].find(e => e.offsetParent !== null && e.innerText.trim());
+  const success = panel ? panel.innerText.replace(/\s+/g, " ").trim().slice(0, 300) : "";
   // reCAPTCHA keeps its challenge frame on the page all along, full size but hidden and parked
   // at top: -10000px (Ashby); it counts only once it is actually shown.
   const shown = (f) => {
@@ -103,7 +161,7 @@ _PAGE_STATE = r"""() => {
   const all = document.body ? document.body.innerText.replace(/\s+/g, " ") : "";
   // The start (headings, a confirmation page) and the end (the form, its errors, an inline thank-you).
   const text = all.length > 5000 ? all.slice(0, 1500) + " … " + all.slice(-3500) : all;
-  return JSON.stringify({url: location.href, errors: [...new Set(errors)].slice(0, 10), challenge, text});
+  return JSON.stringify({url: location.href, errors: [...new Set(errors)].slice(0, 10), challenge, text, success});
 }"""
 
 # The submit button: still on the page, and whether it shows the form is busy sending.
@@ -286,8 +344,11 @@ _TAG_UPLOAD = r"""(selector) => {
   if (button) button.setAttribute("data-bellamy-attach", "1");
   return JSON.stringify({found: true, button: !!button});
 }"""
-_UPLOADED = r"""(name) => {
-  const box = document.querySelector("[data-bellamy-upload]");
+_UPLOADED = r"""(name, shownIn) => {
+  // The tagged box, or (when the widget redrew it) the field's own box the step names.
+  const tagged = document.querySelector("[data-bellamy-upload]");
+  const named = shownIn ? document.querySelector(shownIn) : null;
+  const box = tagged && tagged.innerText.includes(name) ? tagged : (named || tagged);
   const text = box ? box.innerText : "";
   const input = box && box.querySelector("input[type=file]");
   const failed = /error|failed|cannot|could not/i.test(text);
@@ -295,9 +356,10 @@ _UPLOADED = r"""(name) => {
 }"""
 
 
-async def _upload(page, selector: str, path: str) -> tuple[str, str]:
+async def _upload(page, selector: str, path: str, shown_in: str = "") -> tuple[str, str]:
     """Attach a file the way a person does: click Attach (its file dialog is intercepted), then
-    hand the browser the file. Returns (what the field shows, note)."""
+    hand the browser the file. Returns (what the field shows, note). `shown_in`: the field's box,
+    for widgets that redraw themselves once they have the file."""
     name = Path(path).name
     tagged = await _js(page, _TAG_UPLOAD, selector) or {}
     if not tagged.get("found"):
@@ -316,7 +378,7 @@ async def _upload(page, selector: str, path: str) -> tuple[str, str]:
             params={"files": [path], "backendNodeId": element._backend_node_id}, session_id=element._session_id)
         for _ in range(20):  # the form uploads it and then shows the file name
             await asyncio.sleep(0.5)
-            state = await _js(page, _UPLOADED, name) or {}
+            state = await _js(page, _UPLOADED, name, shown_in) or {}
             if state.get("shown"):
                 return name, ""
             if state.get("failed"):
@@ -345,6 +407,46 @@ async def _tick(page, selector: str) -> str:
             await page.evaluate(_CLICK_LABEL if attempt == 1 else _CLICK_SELF, selector)
         await asyncio.sleep(0.3)
     return "" if await page.evaluate(_IS_CHECKED, selector) in ("True", "true") else "would not tick"
+
+
+async def _press(page, selector: str) -> str:
+    """Press a toggle button (Ashby's Yes/No) until the page shows it pressed."""
+    for attempt in range(3):
+        if await page.evaluate(_PRESSED, selector) in ("True", "true"):
+            return ""
+        if attempt == 0:
+            await (await _element(page, selector)).click()
+        else:
+            await page.evaluate(_CLICK_SELF, selector)
+        await asyncio.sleep(0.3)
+    return "" if await page.evaluate(_PRESSED, selector) in ("True", "true") else "would not press"
+
+
+async def pick(page, selector: str, values: list[str], search: bool = False) -> tuple[str, str]:
+    """Choose `values` inside one question's box (`selector`): its Yes/No buttons, its radio or
+    checkbox group (matched by label), or its dropdown. Returns (what was chosen, note)."""
+    scan = await _js(page, _PICK_SCAN, selector) or {}
+    if not scan.get("found"):
+        return "", "not on the page"
+    if not values:
+        return "", "no answer to choose"
+    kind, options = scan.get("type"), scan.get("options") or []
+    if kind == "combo":
+        if len(values) != 1:
+            return "", "the dropdown takes one answer"
+        return await _choose(page, '[data-bellamy-choice="combo"]', values[0], search)
+    if kind not in ("buttons", "inputs") or not options:
+        return "", "no choices in this question"
+    indexes = [best_option(value, options) for value in values]
+    missing = [value for value, index in zip(values, indexes) if index is None]
+    if missing:
+        return "", f"no option matches {missing[0]!r} (options: {', '.join(options[:8])})"
+    for index in indexes:
+        target = f'[data-bellamy-choice="{index}"]'
+        note = await (_press(page, target) if kind == "buttons" else _tick(page, target))
+        if note:
+            return "", f"{options[index]}: {note}"
+    return ", ".join(options[i] for i in indexes), ""
 
 
 async def _choose(page, selector: str, value: str, search: bool = False) -> tuple[str, str]:
@@ -407,17 +509,23 @@ async def fill(page, steps: list[dict]) -> dict:
                     chosen, note = await _choose(page, selector, str(step["otherwise"]))
             elif kind == "check":
                 note = await _tick(page, selector)
+            elif kind == "pick":
+                values = [str(v) for v in step.get("values") or [step.get("value")] if v is not None]
+                chosen, note = await pick(page, selector, values, bool(step.get("search")))
             elif kind == "upload":
                 path = str(Path(step["path"]).expanduser())
                 if not Path(path).is_file():
                     note = f"file not found: {path}"
                 else:
-                    uploaded, note = await _upload(page, selector, path)
+                    uploaded, note = await _upload(page, selector, path, step.get("shown_in") or "")
             else:
                 note = f"unknown step kind {kind!r}"
+            if step.get("close"):
+                await page.press("Escape")
+                await asyncio.sleep(0.2)
         except Exception as exc:  # one bad field must not lose the rest of the form
             note = f"{type(exc).__name__}: {exc}"
-        shown = await _js(page, _READ, selector) or {}
+        shown = await _js(page, _READ_CHOICE if kind == "pick" else _READ, selector) or {}
         value = str(shown.get("value") or "")
         if kind == "upload":
             value, shown = uploaded, {}
@@ -509,9 +617,8 @@ async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, s
             reacted = True  # the page is navigating
             continue
         match = CONFIRMATION.search(state.get("text", ""))
-        if match or "confirmation" in state.get("url", "") and state.get("url") != before:
-            sentence = match.group(0) if match else "confirmation page"
-            return {"submitted": True, "confirmation_text": sentence, "blockers": [], **_evidence(state)}
+        if match or state.get("success") or "confirmation" in state.get("url", "") and state.get("url") != before:
+            return {"submitted": True, "confirmation_text": confirmation_sentence(state, match), "blockers": [], **_evidence(state)}
         if state.get("challenge"):
             return {"submitted": False, "confirmation_text": "", "blockers": ["captcha: a verification challenge appeared after submit"],
                     **_evidence(state)}
@@ -536,6 +643,16 @@ async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, s
         return {"submitted": False, "confirmation_text": "", "blockers": [UNCHANGED], "form_unchanged": True,
                 **_evidence(state)}
     return {"submitted": False, "confirmation_text": "", "blockers": ["no confirmation seen after submit"], **_evidence(state)}
+
+
+def confirmation_sentence(state: dict, match: re.Match | None) -> str:
+    """What says the application went through: the thank-you sentence, else the form's own
+    success panel (named as such, since a company may word it its own way), else the page's address."""
+    if match:
+        return match.group(0)
+    if state.get("success"):
+        return f"application submitted (the form's success panel: {state['success'][:200]})"
+    return "confirmation page"
 
 
 def _evidence(state: dict) -> dict:
