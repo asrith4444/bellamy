@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -152,6 +153,53 @@ and stop: report "verification code" in blockers.
 """
 
 
+_ADOPTERS = {"systemd", "init", "launchd"}  # what an orphaned process's parent becomes
+
+
+def stale_browsers(processes: list[dict], profile_dir: Path) -> list[int]:
+    """Main browser processes on Bellamy's profile whose worker is gone (they were handed to init).
+    Such a browser keeps the profile locked, and every later browser start then times out.
+    `processes`: {"pid", "ppid", "cmdline": [...], "parent": parent process name or ""}."""
+    profile = str(Path(profile_dir).expanduser().resolve())
+    stale = []
+    for proc in processes:
+        args = proc.get("cmdline") or []
+        dirs = [a.split("=", 1)[1] for a in args if a.startswith("--user-data-dir=")]
+        if not dirs or any(a.startswith("--type=") for a in args):
+            continue  # not a browser, or a helper of one (it goes with its browser)
+        if str(Path(dirs[0]).expanduser().resolve()) != profile:
+            continue
+        if proc.get("ppid") in (0, 1) or (proc.get("parent") or "") in _ADOPTERS:
+            stale.append(proc["pid"])
+    return stale
+
+
+def clear_stale_browsers(profile_dir: Path) -> list[int]:
+    """Kill browsers stale_browsers() finds, with their helper processes. Returns their pids."""
+    try:
+        import psutil
+    except ImportError:
+        return []
+    found = []
+    for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
+        try:
+            parent = proc.parent()
+            found.append({**proc.info, "parent": parent.name() if parent else ""})
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    stale = stale_browsers(found, profile_dir)
+    for pid in stale:
+        try:
+            browser = psutil.Process(pid)
+            group = browser.children(recursive=True) + [browser]
+            for p in group:
+                p.kill()
+            psutil.wait_procs(group, timeout=5)
+        except psutil.NoSuchProcess:
+            continue
+    return stale
+
+
 def _usage(history: Any, model: str) -> dict:
     usage = getattr(history, "usage", None)
     if usage is None:
@@ -176,7 +224,12 @@ class Worker:
             return
         from browser_use import Browser
 
+        from .paths import BROWSER_PROFILE_DIR
         from .stealth import build_stealth_profile
+
+        cleared = clear_stale_browsers(BROWSER_PROFILE_DIR)
+        if cleared:
+            print(f"[bellamy-worker] closed a browser left on the profile by an earlier worker: {cleared}", file=sys.stderr)
 
         self.browser = Browser(browser_profile=build_stealth_profile(headless=self.headless, keep_alive=True))
         self.llm = make_llm(self.model)

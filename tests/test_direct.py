@@ -267,6 +267,20 @@ class FalseCaptchaTests(unittest.TestCase):
         self.assertEqual(reply["result"]["blockers"], ["login_required"])
 
 
+class StaleBrowserTests(unittest.TestCase):
+    def test_only_an_orphaned_browser_on_bellamys_profile_is_stale(self):
+        profile = "/home/x/bellamy/.browser-profile"
+        flag = f"--user-data-dir={profile}"
+        processes = [
+            {"pid": 10, "ppid": 1, "cmdline": ["chrome", flag, "--headless"], "parent": "systemd"},  # orphan
+            {"pid": 11, "ppid": 10, "cmdline": ["chrome", "--type=renderer", flag], "parent": "chrome"},  # its helper
+            {"pid": 20, "ppid": 900, "cmdline": ["chrome", flag], "parent": "python"},  # a live worker's browser
+            {"pid": 30, "ppid": 1, "cmdline": ["chrome", "--user-data-dir=/home/x/other"], "parent": "systemd"},
+            {"pid": 40, "ppid": 1, "cmdline": ["sshd"], "parent": "systemd"},
+        ]
+        self.assertEqual(worker.stale_browsers(processes, profile), [10])
+
+
 class CodeStepTests(unittest.TestCase):
     def run_fast(self, coroutine):
         with mock.patch.object(direct.asyncio, "sleep", _no_wait):
