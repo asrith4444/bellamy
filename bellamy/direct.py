@@ -10,7 +10,9 @@ Step kinds:
 Every step also carries "label" (reported back) and "required", and may carry "fallback": other
 step fields to use when its selector is not on the page.
 
-Nothing here clicks a submit button except submit(), which Mark calls only after its own check.
+Nothing here clicks a submit button except submit() and enter_code(), which Mark calls only after
+its own check. When the site emails a code after Submit (Greenhouse's "Security code"), submit()
+reports code_required and leaves the form open; enter_code() types the code and submits again.
 """
 
 from __future__ import annotations
@@ -90,12 +92,104 @@ _PAGE_STATE = r"""() => {
     const box = f.getBoundingClientRect();
     return /recaptcha\/(api2|enterprise)\/bframe|hcaptcha\.com.*challenge|challenges\.cloudflare/.test(src) && box.width > 50 && box.height > 50;
   });
-  const text = document.body ? document.body.innerText.replace(/\s+/g, " ") : "";
-  return JSON.stringify({url: location.href, errors: [...new Set(errors)].slice(0, 10), challenge, text: text.slice(0, 4000)});
+  const all = document.body ? document.body.innerText.replace(/\s+/g, " ") : "";
+  // The start (headings, a confirmation page) and the end (the form, its errors, an inline thank-you).
+  const text = all.length > 5000 ? all.slice(0, 1500) + " … " + all.slice(-3500) : all;
+  return JSON.stringify({url: location.href, errors: [...new Set(errors)].slice(0, 10), challenge, text});
 }"""
+
+# The submit button: still on the page, and whether it shows the form is busy sending.
+_BUTTON_STATE = r"""(selector) => {
+  const b = document.querySelector(selector);
+  if (!b || b.offsetParent === null) return JSON.stringify({found: false, busy: false});
+  const busy = b.disabled || b.getAttribute("aria-disabled") === "true" || b.getAttribute("aria-busy") === "true"
+    || /submitting|sending|loading|please wait/i.test(b.innerText || b.value || "");
+  return JSON.stringify({found: true, busy});
+}"""
+_SCROLL_TO = "(s) => { const e = document.querySelector(s); if (e) e.scrollIntoView({block: 'center'}); return !!e; }"
+_CLICK_JS = "(s) => { const e = document.querySelector(s); if (!e) return false; e.scrollIntoView({block: 'center'}); e.click(); return true; }"
+NUDGE_AFTER = 8.0  # seconds without any reaction before Submit is pressed once more
+UNCHANGED = "not submitted: the form did not react to Submit (still open, nothing sent)"
 
 CONFIRMATION = re.compile(r"thank you for (?:applying|your application|your interest)|application (?:has been )?(?:submitted|received)"
                           r"|we(?:'ve| have) received your application|successfully submitted", re.I)
+
+# A code the site emailed and wants typed in before it takes the application. Greenhouse shows
+# "Security code" as eight one-letter boxes (security-input-0..7) in #email-verification, after
+# Submit, and keeps the application until the code is entered and Submit is pressed again.
+# Elsewhere: a visible, enabled code box on a page that talks about a code it sent.
+# The boxes are tagged data-bellamy-code="0", "1", ... so enter_code can type into each.
+_CODE_PROMPT = r"""() => {
+  const shown = (e) => e && e.offsetParent !== null && !e.disabled;
+  const asks = /(verification|security|one[- ]time|confirmation|access) code|enter the code|code (?:was |has been |we )?sent/i;
+  const tidy = (t) => (t || "").replace(/\s+/g, " ").trim();
+  let boxes = [...document.querySelectorAll('[id^="security-input-"]')].filter(shown);
+  let scope = document.getElementById("email-verification");
+  if (!boxes.length) {
+    const text = document.body ? document.body.innerText : "";
+    if (!asks.test(text)) return JSON.stringify({found: false});
+    boxes = [...document.querySelectorAll("input")].filter(i => shown(i) && /^(text|tel|number|)$/.test(i.getAttribute("type") || "")
+      && /code|otp|verif|security|passcode/i.test([i.id, i.name, i.autocomplete, i.getAttribute("aria-label"), i.placeholder].join(" ")));
+    scope = boxes[0] ? (boxes[0].closest("fieldset, form, [role=dialog], section") || boxes[0].parentElement) : null;
+  }
+  if (!boxes.length) return JSON.stringify({found: false});
+  document.querySelectorAll("[data-bellamy-code]").forEach(e => e.removeAttribute("data-bellamy-code"));
+  boxes.forEach((b, i) => b.setAttribute("data-bellamy-code", String(i)));
+  let prompt = tidy(scope && scope.innerText);
+  if (!asks.test(prompt)) {
+    const body = tidy(document.body.innerText);
+    const at = body.search(asks);
+    prompt = at >= 0 ? body.slice(Math.max(0, at - 120), at + 180) : prompt;
+  }
+  const errorEl = document.getElementById("email-verification-error")
+    || (scope && [...scope.querySelectorAll("[role=alert], [id$=-error], [class*=error]")].find(e => e.offsetParent !== null && e.innerText.trim()));
+  const single = boxes.length === 1 && boxes[0].maxLength > 3 && boxes[0].maxLength < 13 ? boxes[0].maxLength : 0;
+  return JSON.stringify({found: true, boxes: boxes.length, length: boxes.length > 1 ? boxes.length : single,
+                         prompt: prompt.slice(0, 300), error: tidy(errorEl && errorEl.innerText).slice(0, 200),
+                         value: boxes.map(b => b.value || "").join("")});
+}"""
+
+# The button that sends the code: the form's submit button, else a Verify/Submit/Continue
+# button next to the code boxes. Tagged data-bellamy-code-submit; reports whether it is enabled
+# (Greenhouse keeps Submit disabled until all eight boxes hold a character).
+_CODE_BUTTON = r"""(selector) => {
+  const shown = (e) => e && e.offsetParent !== null;
+  const first = document.querySelector('[data-bellamy-code="0"]');
+  let button = [...document.querySelectorAll(selector)].find(shown);
+  if (!button && first) {
+    const scope = first.closest("form, [role=dialog], fieldset, section") || document.body;
+    button = [...scope.querySelectorAll("button, input[type=submit]")]
+      .find(b => shown(b) && /verify|submit|continue|confirm/i.test(b.innerText || b.value || ""));
+  }
+  document.querySelectorAll("[data-bellamy-code-submit]").forEach(e => e.removeAttribute("data-bellamy-code-submit"));
+  if (!button) return JSON.stringify({found: false});
+  button.setAttribute("data-bellamy-code-submit", "1");
+  return JSON.stringify({found: true, enabled: !button.disabled && button.getAttribute("aria-disabled") !== "true"});
+}"""
+
+CODE_ASKED = "verification code: the site emailed a code and takes the application only once it is entered"
+
+
+def code_result(prompt: dict, error: str = "", state: dict | None = None) -> dict:
+    """A SubmitResult for a page waiting for an emailed code. `error`: why the last code failed."""
+    return {"submitted": False, "confirmation_text": "",
+            "blockers": [f"verification code rejected: {error}" if error else CODE_ASKED],
+            "code_required": True, "code_prompt": str(prompt.get("prompt") or "")[:300],
+            "code_length": int(prompt.get("length") or 0), "code_error": error, **_evidence(state or {})}
+
+
+def code_length(prompt_text: str) -> int:
+    """'enter the 8-character code' -> 8. 0 when the text doesn't say."""
+    match = re.search(r"\b(\d{1,2})[- ](?:character|digit|letter|symbol)", prompt_text or "", re.I)
+    return int(match.group(1)) if match else 0
+
+
+async def code_prompt(page) -> dict:
+    """The emailed-code step if the page shows one: {"found", "boxes", "length", "prompt", "error", "value"}."""
+    state = await _js(page, _CODE_PROMPT) or {}
+    if state.get("found") and not state.get("length"):
+        state["length"] = code_length(state.get("prompt", ""))
+    return state
 
 
 def squash(text: str) -> str:
@@ -338,21 +432,72 @@ async def fill(page, steps: list[dict]) -> dict:
             "blockers": blockers, "ready_to_submit": not unfilled and not blockers}
 
 
-async def submit(page, selector: str, wait: float = 30.0) -> dict:
-    """Click the form's submit button once and wait for a confirmation, an error or a challenge."""
+async def submit(page, selector: str, wait: float = 45.0) -> dict:
+    """Click the form's submit button once and wait for a confirmation, an error, a challenge or
+    a request for an emailed code (then code_required is set and the form stays open for enter_code)."""
     button = await _element(page, selector)
     if button is None:
         return {"submitted": False, "confirmation_text": "", "blockers": [f"submit button {selector!r} not found"]}
     before = (await _js(page, _PAGE_STATE) or {}).get("url", "")
+    await page.evaluate(_SCROLL_TO, selector)  # a click off screen, or under the reCAPTCHA badge, can miss
+    await asyncio.sleep(0.4)
     await button.click()
-    deadline = asyncio.get_running_loop().time() + wait
+    return await _outcome(page, before, wait, selector=selector)
+
+
+async def enter_code(page, code: str, selector: str = "button[type=submit]", wait: float = 30.0) -> dict:
+    """Type an emailed code into the code step, press submit once and wait for the outcome.
+    A code the site turns down comes back as code_required with its message in code_error."""
+    prompt = await code_prompt(page)
+    if not prompt.get("found"):
+        return {"submitted": False, "confirmation_text": "", "blockers": ["the code field is not on the page"]}
+    boxes = int(prompt.get("boxes") or 1)
+    if boxes > 1 and len(code) != boxes:
+        return code_result(prompt, f"the code has {len(code)} characters; the form has {boxes} boxes")
+    for i, part in enumerate(list(code) if boxes > 1 else [code]):
+        box = await _element(page, f'[data-bellamy-code="{i}"]')
+        if box is None:
+            return code_result(prompt, "the code boxes changed while typing")
+        await box.fill(part)
+        await asyncio.sleep(0.15)
+    if (await code_prompt(page)).get("value", "") != code:
+        return code_result(prompt, "the code did not stay in the boxes")
+    found: dict = {}
+    for _ in range(10):  # Submit turns on once every box holds a character
+        found = await _js(page, _CODE_BUTTON, selector) or {}
+        if not found.get("found") or found.get("enabled"):
+            break
+        await asyncio.sleep(0.5)
+    if not found.get("found"):
+        return code_result(prompt, f"no button to send the code ({selector!r} not found)")
+    if not found.get("enabled"):
+        return code_result(prompt, "the submit button stayed disabled after typing the code")
+    before = (await _js(page, _PAGE_STATE) or {}).get("url", "")
+    await (await _element(page, '[data-bellamy-code-submit="1"]')).click()
+    return await _outcome(page, before, wait, code_sent=True)
+
+
+async def _outcome(page, before: str, wait: float, *, code_sent: bool = False, selector: str | None = None) -> dict:
+    """After a submit click: wait for a confirmation, a challenge, a request for an emailed code
+    (or, once a code was sent, the site's verdict on it), or form errors.
+
+    With `selector` (the first submit), a page that shows no reaction at all (the button never
+    busy, nothing new on the page) gets Submit pressed once more after NUDGE_AFTER seconds; still
+    nothing means the form was never sent: form_unchanged is set and the form stays as it was."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
     state: dict = {}
-    while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(1.0)
+    prompt: dict = {}
+    reacted, nudged = selector is None, False
+    while loop.time() < start + wait:
+        await asyncio.sleep(0.5)
         try:
             state = await _js(page, _PAGE_STATE) or {}
+            prompt = await code_prompt(page)
+            button = await _js(page, _BUTTON_STATE, selector) if selector else None
         except Exception:
-            continue  # the page is navigating
+            reacted = True  # the page is navigating
+            continue
         match = CONFIRMATION.search(state.get("text", ""))
         if match or "confirmation" in state.get("url", "") and state.get("url") != before:
             sentence = match.group(0) if match else "confirmation page"
@@ -360,9 +505,25 @@ async def submit(page, selector: str, wait: float = 30.0) -> dict:
         if state.get("challenge"):
             return {"submitted": False, "confirmation_text": "", "blockers": ["captcha: a verification challenge appeared after submit"],
                     **_evidence(state)}
-        if state.get("errors") and asyncio.get_running_loop().time() > deadline - wait + 4:
+        if prompt.get("found"):
+            if not code_sent:
+                return code_result(prompt, state=state)
+            if prompt.get("error"):
+                return code_result(prompt, prompt["error"], state)
+            continue  # the code is on its way to the site
+        if state.get("errors") and loop.time() > start + 4:
             return {"submitted": False, "confirmation_text": "", "blockers": [f"form error: {e}" for e in state["errors"]],
                     **_evidence(state)}
+        if button is not None and (not button.get("found") or button.get("busy") or state.get("url") != before):
+            reacted = True
+        if not reacted and not nudged and loop.time() > start + NUDGE_AFTER:
+            nudged = True
+            await page.evaluate(_CLICK_JS, selector)
+    if code_sent and prompt.get("found"):
+        return code_result(prompt, prompt.get("error") or "the site did not take the code", state)
+    if not reacted:
+        return {"submitted": False, "confirmation_text": "", "blockers": [UNCHANGED], "form_unchanged": True,
+                **_evidence(state)}
     return {"submitted": False, "confirmation_text": "", "blockers": ["no confirmation seen after submit"], **_evidence(state)}
 
 

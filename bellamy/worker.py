@@ -13,6 +13,8 @@ Send one JSON object per line on stdin; get one JSON object per line on stdout:
   {"cmd": "fill_direct", "url": "...", "wait_for": "#first_name", "steps": [...]}
                                                   -> FillReport, no AI (see bellamy/direct.py)
   {"cmd": "submit_direct", "selector": "button[type=submit]"}       -> SubmitResult, no AI
+  A submit that the site answers by emailing a code returns code_required and leaves the form open:
+  {"cmd": "enter_code", "code": "Ab3dE5fG", "selector": "button[type=submit]"} -> SubmitResult, no AI
   {"id": 4, "cmd": "screenshot", "path": "/tmp/x.png"}              -> {"path": ...}
   {"id": 5, "cmd": "close"}
 
@@ -26,6 +28,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -111,6 +114,8 @@ provide its answer. For a file upload, verify the real widget shows the uploaded
 Report a complete final field snapshot including already-correct fields, not just the changes.
 """
 
+CAPTCHA_WORDS = re.compile(r"captcha|turnstile|are you a robot|verify (?:that )?you(?:'re| are) (?:a )?human|human verification", re.I)
+
 REPAIR_NOTE = """A check of the last fill found these problems. Fix each one; keep every field that is
 already correct as it is:
 {problems}
@@ -142,6 +147,8 @@ SUBMIT_TASK += """
 Inspect actual visible inline errors and copy their exact labels/messages. A count of search
 matches is not an error message. The presence of a passive CAPTCHA iframe is not a blocker.
 Do not report success from a button click alone. If the outcome remains unknown, say so.
+If the page asks for a code that was sent by email (a verification or security code), type nothing
+and stop: report "verification code" in blockers.
 """
 
 
@@ -225,16 +232,29 @@ class Worker:
         if cmd == "read_form":
             result, usage, success = await self.run(read_form_task(command.get("url")), FormRead,
                                                     max_steps=command.get("max_steps", 20), guard_active=True)
-            return {"result": (result or FormRead(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
+            result = await self._real_blockers(result or FormRead(blockers=["no result"]))
+            return {"result": result.model_dump(), "usage": usage, "success": success}
         if cmd == "fill":
             files = command.get("files") or {}
             result, usage, success = await self.run(fill_task(command), FillReport, max_steps=command.get("max_steps", 60),
                                                     guard_active=True, files=list(files.values()))
-            return {"result": (result or FillReport(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
+            result = await self._real_blockers(result or FillReport(blockers=["no result"]))
+            return {"result": result.model_dump(), "usage": usage, "success": success}
         if cmd == "submit":
             result, usage, success = await self.run(SUBMIT_TASK, SubmitResult, max_steps=command.get("max_steps", 10),
                                                     guard_active=False)
-            return {"result": (result or SubmitResult(blockers=["no result"])).model_dump(), "usage": usage, "success": success}
+            result = result or SubmitResult(blockers=["no result"])
+            if not result.submitted:
+                result = await self._code_step(result)
+            return {"result": result.model_dump(), "usage": usage, "success": success}
+        if cmd == "enter_code":
+            from . import direct
+
+            page = await self.browser.must_get_current_page()
+            result = await direct.enter_code(page, str(command["code"]), command.get("selector") or "button[type=submit]",
+                                             wait=float(command.get("wait", 30)))
+            no_cost = {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "model": "direct"}
+            return {"result": SubmitResult(**result).model_dump(), "usage": no_cost, "success": result["submitted"]}
         if cmd in ("fill_direct", "submit_direct"):
             from . import direct
 
@@ -246,7 +266,7 @@ class Worker:
             no_cost = {"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "model": "direct"}
             if cmd == "submit_direct":
                 result = await direct.submit(page, command.get("selector") or "button[type=submit]",
-                                             wait=float(command.get("wait", 30)))
+                                             wait=float(command.get("wait", 45)))
                 return {"result": SubmitResult(**result).model_dump(), "usage": no_cost, "success": result["submitted"]}
             steps = command.get("steps") or []
             ready = await direct.wait_for(page, command.get("wait_for") or (steps[0]["selector"] if steps else "form"), timeout=25)
@@ -261,6 +281,42 @@ class Worker:
             await self.browser.take_screenshot(path=command["path"], full_page=True)
             return {"result": {"path": command["path"]}}
         raise ValueError(f"unknown command {cmd!r}")
+
+    async def _real_blockers(self, result):
+        """Drop a CAPTCHA the model reported when no challenge is showing. Ashby and Lever forms
+        carry reCAPTCHA's passive badge ("Recaptcha requires verification"), which models keep
+        mistaking for a challenge; only a visible challenge window counts."""
+        from . import direct
+
+        said = [b for b in result.blockers if CAPTCHA_WORDS.search(str(b))]
+        if not said:
+            return result
+        try:
+            page = await self.browser.must_get_current_page()
+            state = await direct._js(page, direct._PAGE_STATE) or {}
+        except Exception:
+            return result  # can't look: keep the model's word
+        if state.get("challenge"):
+            return result
+        print(f"[bellamy-worker] ignored a captcha blocker with no visible challenge: {said}", file=sys.stderr)
+        return result.model_copy(update={"blockers": [b for b in result.blockers if b not in said]})
+
+    async def _code_step(self, result: SubmitResult) -> SubmitResult:
+        """After the AI's submit: if the page now asks for an emailed code, say so in the result
+        (the browser stays open on it for enter_code)."""
+        from . import direct
+
+        # Only a code box Bellamy can type into counts, not the model's own say-so.
+        unasked = result.model_copy(update={"code_required": False, "code_prompt": "", "code_length": 0, "code_error": ""})
+        try:
+            page = await self.browser.must_get_current_page()
+            prompt = await direct.code_prompt(page)
+        except Exception:
+            return unasked
+        if not prompt.get("found"):
+            return unasked
+        return SubmitResult(**{**result.model_dump(), **direct.code_result(prompt),
+                               "url": result.url, "page_text": result.page_text})
 
     async def close(self) -> None:
         if self.browser is not None:

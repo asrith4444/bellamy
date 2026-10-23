@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest import mock
 
@@ -70,8 +71,246 @@ class WorkerDirectTests(unittest.TestCase):
         done = {"submitted": True, "confirmation_text": "Thank you for applying", "blockers": []}
         with mock.patch.object(direct, "submit", mock.AsyncMock(return_value=done)) as submit:
             reply = asyncio.run(instance.handle({"cmd": "submit_direct"}))
-        submit.assert_awaited_once_with("page", "button[type=submit]", wait=30.0)
+        submit.assert_awaited_once_with("page", "button[type=submit]", wait=45.0)
         self.assertTrue(reply["result"]["submitted"])
+
+    def test_enter_code_runs_without_ai(self):
+        instance = self.make()
+        done = {"submitted": True, "confirmation_text": "Thank you for applying", "blockers": []}
+        with mock.patch.object(direct, "enter_code", mock.AsyncMock(return_value=done)) as enter:
+            reply = asyncio.run(instance.handle({"cmd": "enter_code", "code": "Ab3dE5fG", "selector": "button.go"}))
+        enter.assert_awaited_once_with("page", "Ab3dE5fG", "button.go", wait=30.0)
+        self.assertTrue(reply["success"] and reply["result"]["submitted"])
+        self.assertEqual(reply["usage"]["cost"], 0.0)
+
+    def test_ai_submit_reports_a_code_step_only_when_the_page_shows_one(self):
+        instance = self.make()
+        said = worker.SubmitResult(blockers=["verification code"], code_required=True)
+        instance.run = mock.AsyncMock(return_value=(said, {"cost": 0.01}, False))
+        prompt = {"found": True, "boxes": 8, "length": 8, "prompt": "A verification code was sent to you."}
+        with mock.patch.object(direct, "code_prompt", mock.AsyncMock(return_value=prompt)):
+            shown = asyncio.run(instance.handle({"cmd": "submit"}))["result"]
+        self.assertTrue(shown["code_required"])
+        self.assertEqual((shown["code_length"], shown["code_prompt"]), (8, "A verification code was sent to you."))
+        with mock.patch.object(direct, "code_prompt", mock.AsyncMock(return_value={"found": False})):
+            unseen = asyncio.run(instance.handle({"cmd": "submit"}))["result"]
+        self.assertFalse(unseen["code_required"])  # the model's word alone is not a code box
+
+
+class CodePage:
+    """A Greenhouse form after Submit: eight code boxes; the right code leads to the confirmation."""
+
+    def __init__(self, code="Ab3dE5fG", submitted=False):
+        self.code, self.boxes, self.submits = code, [""] * 8, 1 if submitted else 0
+        self.confirmed, self.error = False, ""
+
+    async def evaluate(self, function, *args):
+        if function is direct._PAGE_STATE:
+            text = "Thank you for applying to Harborview!" if self.confirmed else "Apply for Data Engineer Submit application"
+            return json.dumps({"url": "https://x/apply", "errors": [self.error] if self.error else [], "challenge": False,
+                               "text": text})
+        if function is direct._CODE_PROMPT:
+            if self.confirmed or not self.submits:
+                return json.dumps({"found": False})
+            return json.dumps({"found": True, "boxes": 8, "length": 8, "error": self.error, "value": "".join(self.boxes),
+                               "prompt": "A verification code was sent to j***@example.com. Enter the 8-character code."})
+        if function is direct._CODE_BUTTON:
+            return json.dumps({"found": True, "enabled": all(self.boxes)})
+        if function is direct._BUTTON_STATE:
+            return json.dumps({"found": True, "busy": False})
+        if function is direct._SCROLL_TO:
+            return "true"
+        raise AssertionError(f"unexpected script {function[:40]!r}")
+
+    async def get_elements_by_css_selector(self, selector):
+        if selector.startswith('[data-bellamy-code="'):
+            return [Box(self, int(selector.split('"')[1]))]
+        return [SubmitButton(self)]
+
+
+class Box:
+    def __init__(self, page, index):
+        self.page, self.index = page, index
+
+    async def fill(self, value):
+        self.page.boxes[self.index] = value
+
+
+class SubmitButton:
+    def __init__(self, page):
+        self.page = page
+
+    async def click(self):
+        self.page.submits += 1
+        if self.page.submits > 1:  # the code was sent along
+            right = "".join(self.page.boxes) == self.page.code
+            self.page.confirmed, self.page.error = right, "" if right else "Invalid security code"
+
+
+async def _no_wait(_seconds):
+    return None
+
+
+class StillPage:
+    """A form whose Submit does nothing: no busy button, no change. `wakes`: the press that works."""
+
+    def __init__(self, wakes: int | None = None, busy_then_quiet: bool = False):
+        self.presses, self.wakes, self.busy_then_quiet, self.polls = 0, wakes, busy_then_quiet, 0
+
+    @property
+    def sent(self):
+        return self.wakes is not None and self.presses >= self.wakes
+
+    async def evaluate(self, function, *args):
+        if function is direct._PAGE_STATE:
+            text = "Thank you for applying!" if self.sent else "Apply for Data Engineer Submit application"
+            return json.dumps({"url": "https://x/apply", "errors": [], "challenge": False, "text": text})
+        if function is direct._CODE_PROMPT:
+            return json.dumps({"found": False})
+        if function is direct._BUTTON_STATE:
+            self.polls += 1
+            return json.dumps({"found": True, "busy": self.busy_then_quiet and self.polls == 2})
+        if function is direct._SCROLL_TO:
+            return "true"
+        if function is direct._CLICK_JS:
+            self.presses += 1
+            return "true"
+        raise AssertionError(f"unexpected script {function[:40]!r}")
+
+    async def get_elements_by_css_selector(self, selector):
+        return [PressButton(self)]
+
+
+class PressButton:
+    def __init__(self, page):
+        self.page = page
+
+    async def click(self):
+        self.page.presses += 1
+
+
+class FakeClock:
+    """asyncio's clock, moved on by every sleep, so a 45-second wait runs instantly."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def time(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.now += seconds
+
+
+class SubmitReactionTests(unittest.TestCase):
+    def run_clocked(self, page, wait=45.0):
+        clock = FakeClock()
+        loop = mock.MagicMock()
+        loop.time = clock.time
+        with mock.patch.object(direct.asyncio, "sleep", clock.sleep), \
+                mock.patch.object(direct.asyncio, "get_running_loop", return_value=loop):
+            return asyncio.run(direct.submit(page, "button[type=submit]", wait=wait))
+
+    def test_a_submit_that_draws_no_reaction_is_pressed_once_more_then_reported_unsent(self):
+        page = StillPage()
+        result = self.run_clocked(page)
+        self.assertEqual(page.presses, 2)
+        self.assertFalse(result["submitted"])
+        self.assertTrue(result["form_unchanged"])
+        self.assertEqual(result["blockers"], [direct.UNCHANGED])
+
+    def test_the_second_press_can_finish_the_application(self):
+        page = StillPage(wakes=2)
+        result = self.run_clocked(page)
+        self.assertTrue(result["submitted"])
+        self.assertEqual(page.presses, 2)
+
+    def test_a_busy_button_means_the_form_was_sent_so_no_second_press(self):
+        page = StillPage(busy_then_quiet=True)
+        result = self.run_clocked(page)
+        self.assertEqual(page.presses, 1)
+        self.assertFalse(result.get("form_unchanged", False))
+        self.assertEqual(result["blockers"], ["no confirmation seen after submit"])
+
+
+class FalseCaptchaTests(unittest.TestCase):
+    def make(self, challenge: bool):
+        instance = worker.Worker()
+        instance._ensure = mock.AsyncMock()
+        instance.browser = mock.MagicMock()
+        instance.browser.must_get_current_page = mock.AsyncMock(return_value="page")
+        state = {"url": "https://x", "errors": [], "challenge": challenge, "text": ""}
+        return instance, mock.patch.object(direct, "_js", mock.AsyncMock(return_value=state))
+
+    def test_a_captcha_the_page_does_not_show_is_dropped(self):
+        instance, js = self.make(challenge=False)
+        read = worker.FormRead(is_application_form=True, blockers=["captcha", "Recaptcha requires verification."])
+        instance.run = mock.AsyncMock(return_value=(read, {"cost": 0.01}, True))
+        with js:
+            reply = asyncio.run(instance.handle({"cmd": "read_form", "url": "https://x"}))
+        self.assertEqual(reply["result"]["blockers"], [])
+
+    def test_a_visible_challenge_stays_a_blocker(self):
+        instance, js = self.make(challenge=True)
+        report = worker.FillReport(blockers=["captcha: select all images with buses"])
+        instance.run = mock.AsyncMock(return_value=(report, {"cost": 0.01}, True))
+        with js:
+            reply = asyncio.run(instance.handle({"cmd": "fill", "url": None, "plan": []}))
+        self.assertEqual(reply["result"]["blockers"], ["captcha: select all images with buses"])
+
+    def test_other_blockers_are_kept(self):
+        instance, js = self.make(challenge=False)
+        read = worker.FormRead(blockers=["login_required", "captcha"])
+        instance.run = mock.AsyncMock(return_value=(read, {"cost": 0.01}, True))
+        with js:
+            reply = asyncio.run(instance.handle({"cmd": "read_form", "url": "https://x"}))
+        self.assertEqual(reply["result"]["blockers"], ["login_required"])
+
+
+class CodeStepTests(unittest.TestCase):
+    def run_fast(self, coroutine):
+        with mock.patch.object(direct.asyncio, "sleep", _no_wait):
+            return asyncio.run(coroutine)
+
+    def test_code_length_from_the_prompt(self):
+        self.assertEqual(direct.code_length("enter the 8-character code to confirm"), 8)
+        self.assertEqual(direct.code_length("Type the 6 digit code we sent"), 6)
+        self.assertEqual(direct.code_length("Enter the code"), 0)
+
+    def test_submit_that_asks_for_an_emailed_code_leaves_the_form_open(self):
+        page = CodePage()
+        result = self.run_fast(direct.submit(page, "button[type=submit]"))
+        self.assertFalse(result["submitted"])
+        self.assertTrue(result["code_required"])
+        self.assertEqual(result["code_length"], 8)
+        self.assertEqual(result["blockers"], [direct.CODE_ASKED])
+        self.assertIn("j***@example.com", result["code_prompt"])
+        self.assertEqual(page.submits, 1)
+
+    def test_enter_code_types_one_character_per_box_then_submits(self):
+        page = CodePage(submitted=True)
+        result = self.run_fast(direct.enter_code(page, "Ab3dE5fG"))
+        self.assertEqual(page.boxes, list("Ab3dE5fG"))
+        self.assertEqual(page.submits, 2)
+        self.assertTrue(result["submitted"])
+        self.assertFalse(result.get("code_required"))
+
+    def test_a_wrong_code_comes_back_with_the_sites_message(self):
+        page = CodePage(submitted=True)
+        result = self.run_fast(direct.enter_code(page, "ZZZZZZZZ"))
+        self.assertFalse(result["submitted"])
+        self.assertTrue(result["code_required"])
+        self.assertEqual(result["code_error"], "Invalid security code")
+
+    def test_a_code_of_the_wrong_length_is_not_typed(self):
+        page = CodePage(submitted=True)
+        result = self.run_fast(direct.enter_code(page, "Ab3d"))
+        self.assertIn("8 boxes", result["code_error"])
+        self.assertEqual((page.boxes, page.submits), ([""] * 8, 1))
+
+    def test_no_code_box_on_the_page(self):
+        result = self.run_fast(direct.enter_code(CodePage(), "Ab3dE5fG"))
+        self.assertEqual(result["blockers"], ["the code field is not on the page"])
 
 
 if __name__ == "__main__":

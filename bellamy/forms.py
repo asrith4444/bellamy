@@ -51,6 +51,13 @@ class SubmitResult(BaseModel):
     blockers: list[str] = Field(default_factory=list)
     url: str = ""  # where the page was after the submit
     page_text: str = ""  # what it said, so an unconfirmed submit can be judged
+    # The site emailed a code and holds the application until it is entered (enter_code).
+    code_required: bool = False
+    code_prompt: str = ""  # what the page says about the code, e.g. who it was sent to
+    code_length: int = 0  # characters the code has, when the page says (Greenhouse: 8)
+    code_error: str = ""  # why the last code entered was turned down
+    # Submit drew no reaction at all, even pressed twice: the form was never sent and is still open.
+    form_unchanged: bool = False
 
 
 _FINAL = re.compile(r"\b(submit|send (?:my |your )?application|finish application|complete application)\b", re.I)
