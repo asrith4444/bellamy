@@ -87,11 +87,19 @@ _EMPTY_REQUIRED = r"""(covered) => {
 _PAGE_STATE = r"""() => {
   const errors = [...document.querySelectorAll("[id$=-error], [class*=error-message], [class*=helper-text--error], [role=alert]")]
     .filter(e => e.offsetParent !== null && e.innerText.trim()).map(e => e.innerText.replace(/\s+/g, " ").trim());
-  const challenge = [...document.querySelectorAll("iframe")].some(f => {
-    const src = f.src || "";
+  // reCAPTCHA keeps its challenge frame on the page all along, full size but hidden and parked
+  // at top: -10000px (Ashby); it counts only once it is actually shown.
+  const shown = (f) => {
     const box = f.getBoundingClientRect();
-    return /recaptcha\/(api2|enterprise)\/bframe|hcaptcha\.com.*challenge|challenges\.cloudflare/.test(src) && box.width > 50 && box.height > 50;
-  });
+    if (box.width <= 50 || box.height <= 50 || box.bottom + window.scrollY < 0 || getComputedStyle(f).visibility === "hidden") return false;
+    for (let e = f; e && e !== document.body; e = e.parentElement) {
+      const style = getComputedStyle(e);
+      if (style.display === "none" || parseFloat(style.opacity) === 0) return false;
+    }
+    return true;
+  };
+  const challenge = [...document.querySelectorAll("iframe")].some(f =>
+    /recaptcha\/(api2|enterprise)\/bframe|hcaptcha\.com.*challenge|challenges\.cloudflare/.test(f.src || "") && shown(f));
   const all = document.body ? document.body.innerText.replace(/\s+/g, " ") : "";
   // The start (headings, a confirmation page) and the end (the form, its errors, an inline thank-you).
   const text = all.length > 5000 ? all.slice(0, 1500) + " … " + all.slice(-3500) : all;
